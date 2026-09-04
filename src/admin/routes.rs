@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::admin::http::{HandlerFuture, Reply, Request, Response};
-use crate::config::{Config, RelayConfig, StickyMode, Strategy};
+use crate::config::{AuthConfig, Config, RelayConfig, StickyMode, Strategy, TlsMode};
 use crate::events::EventKind;
 use crate::metrics::{MessageStatus, RelayMetricsRow};
 use crate::relay::health;
@@ -90,6 +90,7 @@ async fn route(state: Arc<AppState>, request: Request) -> Reply {
         // -- relays --------------------------------------------------------
         ("GET", ["api", "relays"]) => list_relays(&state).into(),
         ("POST", ["api", "relays"]) => add_relay(&state, &request).await.into(),
+        ("POST", ["api", "relays", "import"]) => import_relays(&state, &request).await.into(),
         ("POST", ["api", "relays", "activate-all"]) => {
             bulk_activation(&state, &request, BulkAction::ActivateAll).into()
         }
@@ -793,11 +794,32 @@ async fn verify_smtp(state: &Arc<AppState>, relay: &RelayConfig) -> Result<u64, 
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct AddRelayBody {
+    #[serde(flatten)]
+    relay: RelayConfig,
+    /// Copy the stored password from this existing provider when the form
+    /// password is blank (used by Clone).
+    #[serde(default)]
+    clone_from: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImportRelaysBody {
+    /// One provider per line: `host:port:user:pass:ssl` or `|` separated.
+    /// Optional sixth field is From: `host:port:user:pass:ssl:from@domain`.
+    text: String,
+}
+
 async fn add_relay(state: &Arc<AppState>, request: &Request) -> Response {
-    let mut relay: RelayConfig = match request.body_json() {
-        Ok(relay) => relay,
+    let mut body: AddRelayBody = match request.body_json() {
+        Ok(body) => body,
         Err(error) => return Response::error(400, &error),
     };
+    if let Some(source_id) = body.clone_from.as_deref() {
+        apply_clone_password(&state.config(), source_id, &mut body.relay);
+    }
+    let mut relay = body.relay;
     relay.sync_from_identity();
 
     if state.pool().contains(&relay.id) {
@@ -823,6 +845,225 @@ async fn add_relay(state: &Arc<AppState>, request: &Request) -> Response {
         }
         Err(error) => Response::error(422, &error),
     }
+}
+
+fn apply_clone_password(config: &Config, source_id: &str, relay: &mut RelayConfig) {
+    let incoming_blank = relay
+        .auth
+        .as_ref()
+        .map(|auth| auth.password.is_empty() || auth.password == crate::config::REDACTED)
+        .unwrap_or(true);
+    if !incoming_blank {
+        return;
+    }
+    let Some(source) = config.relay(source_id) else {
+        return;
+    };
+    if let Some(source_auth) = &source.auth {
+        match &mut relay.auth {
+            Some(auth) => {
+                if auth.username.is_empty() {
+                    auth.username = source_auth.username.clone();
+                }
+                auth.password = source_auth.password.clone();
+            }
+            None => relay.auth = source.auth.clone(),
+        }
+    }
+}
+
+fn parse_tls_token(value: &str) -> Option<TlsMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "ssl" | "tls" | "smtps" | "implicit" | "wrapper" => Some(TlsMode::Tls),
+        "starttls" | "start_tls" | "587" => Some(TlsMode::StartTls),
+        "none" | "plain" | "false" => Some(TlsMode::None),
+        "opportunistic" | "auto" => Some(TlsMode::Opportunistic),
+        _ => None,
+    }
+}
+
+fn split_import_fields(line: &str) -> Vec<String> {
+    if line.contains('|') && line.chars().filter(|c| *c == '|').count() >= 4 {
+        line.split('|').map(|part| part.trim().to_string()).collect()
+    } else {
+        line.split(':').map(|part| part.trim().to_string()).collect()
+    }
+}
+
+fn parse_smtp_import_line(line: &str) -> Result<RelayConfig, String> {
+    let raw = line.trim();
+    if raw.is_empty() || raw.starts_with('#') {
+        return Err("empty line".to_string());
+    }
+    let parts = split_import_fields(raw);
+    if parts.len() < 5 {
+        return Err(
+            "expected host:port:user:pass:ssl  (or host|port|user|pass|ssl)".to_string(),
+        );
+    }
+
+    let tls_idx = parts
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, part)| parse_tls_token(part).map(|_| index))
+        .ok_or_else(|| "last fields must include ssl, tls, starttls or none".to_string())?;
+    if tls_idx < 4 {
+        return Err("need host, port, user, password and a TLS mode".to_string());
+    }
+
+    let host = parts[0].clone();
+    if host.is_empty() {
+        return Err("host is empty".to_string());
+    }
+    let port: u16 = parts[1]
+        .parse()
+        .map_err(|_| format!("invalid port `{}`", parts[1]))?;
+    let username = parts[2].clone();
+    if username.is_empty() {
+        return Err("username is empty".to_string());
+    }
+    let password = parts[3..tls_idx].join(":");
+    if password.is_empty() {
+        return Err("password is empty".to_string());
+    }
+    let tls = parse_tls_token(&parts[tls_idx]).unwrap();
+    let from = if tls_idx + 1 < parts.len() {
+        let value = parts[tls_idx + 1..].join(":");
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    } else {
+        None
+    };
+
+    let mut relay = RelayConfig {
+        host,
+        port,
+        tls,
+        from_address: from.clone().unwrap_or_default(),
+        from_same_as_username: from.is_none(),
+        auth: Some(AuthConfig {
+            username,
+            password,
+            mechanism: None,
+        }),
+        ..Default::default()
+    };
+    relay.sync_from_identity();
+    Ok(relay)
+}
+
+fn unique_relay_id(taken: &mut std::collections::BTreeSet<String>, username: &str, host: &str) -> String {
+    let base = {
+        let raw = if !username.trim().is_empty() {
+            username
+        } else {
+            host
+        };
+        let cleaned: String = raw
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let cleaned = cleaned.trim_matches('_');
+        if cleaned.is_empty() {
+            "smtp".to_string()
+        } else {
+            cleaned.to_string()
+        }
+    };
+    let mut id = base.clone();
+    let mut n = 2u32;
+    while taken.contains(&id) {
+        id = format!("{base}_{n}");
+        n += 1;
+    }
+    taken.insert(id.clone());
+    id
+}
+
+async fn import_relays(state: &Arc<AppState>, request: &Request) -> Response {
+    let body: ImportRelaysBody = match request.body_json() {
+        Ok(body) => body,
+        Err(error) => return Response::error(400, &error),
+    };
+
+    let mut taken: std::collections::BTreeSet<String> =
+        state.config().relays.iter().map(|relay| relay.id.clone()).collect();
+    let mut accepted: Vec<RelayConfig> = Vec::new();
+    let mut failed: Vec<Value> = Vec::new();
+
+    for (index, raw) in body.text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match parse_smtp_import_line(line) {
+            Ok(mut relay) => {
+                let username = relay
+                    .auth
+                    .as_ref()
+                    .map(|auth| auth.username.as_str())
+                    .unwrap_or("");
+                relay.id = unique_relay_id(&mut taken, username, &relay.host);
+                match verify_smtp(state, &relay).await {
+                    Ok(_) => accepted.push(relay),
+                    Err(response) => {
+                        let message = String::from_utf8_lossy(&response.body).into_owned();
+                        let parsed: Value =
+                            serde_json::from_str(&message).unwrap_or(json!({ "error": message }));
+                        failed.push(json!({
+                            "line": index + 1,
+                            "text": line,
+                            "error": parsed.get("error").and_then(|v| v.as_str()).unwrap_or("SMTP test failed"),
+                        }));
+                    }
+                }
+            }
+            Err(error) => failed.push(json!({
+                "line": index + 1,
+                "text": line,
+                "error": error,
+            })),
+        }
+    }
+
+    if accepted.is_empty() && failed.is_empty() {
+        return Response::error(400, "no SMTP lines to import");
+    }
+
+    let added_ids: Vec<String> = accepted.iter().map(|relay| relay.id.clone()).collect();
+    if !accepted.is_empty() {
+        if let Err(error) = state.edit_config(should_persist(state, request), move |config| {
+            config.relays.extend(accepted);
+        }) {
+            return Response::error(422, &error);
+        }
+        for id in &added_ids {
+            state
+                .events
+                .publish(EventKind::Relay, json!({ "action": "added", "id": id }));
+        }
+    }
+
+    Response::json_value(
+        200,
+        &json!({
+            "ok": failed.is_empty(),
+            "added": added_ids,
+            "failed": failed,
+            "added_count": added_ids.len(),
+            "failed_count": failed.len(),
+        }),
+    )
 }
 
 async fn update_relay(state: &Arc<AppState>, request: &Request, id: &str) -> Response {
@@ -1435,5 +1676,29 @@ mod tests {
         assert_eq!(parse_status("delivered"), Some(MessageStatus::Delivered));
         assert_eq!(parse_status("DEFERRED"), Some(MessageStatus::Deferred));
         assert_eq!(parse_status("nope"), None);
+    }
+
+    #[test]
+    fn import_line_parses_colon_and_pipe_and_password_colons() {
+        let colon = parse_smtp_import_line(
+            "smtp.example.com:465:info@example.com:p@ss:w:ord:ssl",
+        )
+        .unwrap();
+        assert_eq!(colon.host, "smtp.example.com");
+        assert_eq!(colon.port, 465);
+        assert_eq!(colon.tls, TlsMode::Tls);
+        assert_eq!(colon.auth.as_ref().unwrap().username, "info@example.com");
+        assert_eq!(colon.auth.as_ref().unwrap().password, "p@ss:w:ord");
+        assert!(colon.from_same_as_username);
+        assert_eq!(colon.effective_from_address(), "info@example.com");
+
+        let pipe = parse_smtp_import_line(
+            "smtp.example.com|587|mailer@example.com|secret|starttls|news@example.com",
+        )
+        .unwrap();
+        assert_eq!(pipe.port, 587);
+        assert_eq!(pipe.tls, TlsMode::StartTls);
+        assert!(!pipe.from_same_as_username);
+        assert_eq!(pipe.from_address, "news@example.com");
     }
 }

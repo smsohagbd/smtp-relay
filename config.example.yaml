@@ -29,10 +29,10 @@ server:
   # Maximum RCPT TO commands accepted in one transaction.
   max_recipients_per_message: 1000
 
-  # Require a successful AUTH before MAIL FROM is accepted. Enable this if the
-  # listener is reachable from anywhere other than localhost, and add at least
-  # one entry to `auth_users` below.
-  require_auth: false
+  # Require a successful AUTH before MAIL FROM is accepted. `setup.sh` turns
+  # this on and copies the admin username/password into auth_users so Mautic
+  # and other clients can log in. Change the password here any time.
+  require_auth: true
 
   # When the inbound session reports success to Mautic:
   #   queue  - accept, spool, deliver in the background (highest throughput;
@@ -55,10 +55,10 @@ server:
     # - "172.16.0.0/12"
 
   # Credentials accepted by the inbound AUTH PLAIN / AUTH LOGIN.
-  auth_users: []
-  # auth_users:
-  #   - username: "mautic"
-  #     password: "change-me"
+  # setup.sh writes the same pair as admin.username / admin.password.
+  auth_users:
+    - username: "admin"
+      password: "admin"
 
 routing:
   # round_robin - equal share, strict rotation

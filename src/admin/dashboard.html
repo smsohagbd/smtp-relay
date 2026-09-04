@@ -108,6 +108,7 @@
     background: var(--panel); color: var(--text); border: 1px solid var(--border);
     border-radius: var(--radius); padding: 0; min-width: 340px; max-width: 620px; width: 92%;
   }
+  #import-dialog { max-width: 720px; }
   dialog::backdrop { background: rgba(0,0,0,.6); }
   dialog .panel-body { display: grid; gap: 10px; }
   dialog .row { display: grid; gap: 5px; }
@@ -212,6 +213,8 @@
         <button class="good" id="btn-activate-all">Activate all</button>
         <button class="danger" id="btn-deactivate-all">Deactivate all</button>
         <button id="btn-probe-all">Health check</button>
+        <button id="btn-delete-selected" class="danger">Delete selected</button>
+        <button id="btn-bulk-import">Bulk add</button>
         <button class="primary" id="btn-add-relay">Add SMTP provider</button>
       </div>
       <div id="relay-table"></div>
@@ -284,6 +287,7 @@
   <form id="relay-form">
     <div class="panel-body">
       <input type="hidden" id="relay-editing" value="">
+      <input type="hidden" id="relay-clone-from" value="">
       <div class="grid-2">
         <div class="row"><span>Provider id</span><input type="text" id="relay-id" placeholder="relay_node_1" required></div>
         <div class="row"><span>Enabled</span>
@@ -356,6 +360,29 @@
       <button type="submit" class="primary" id="relay-save">Test &amp; save</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="import-dialog">
+  <div class="panel-head"><strong>Bulk add SMTP providers</strong></div>
+  <div class="panel-body">
+    <p style="margin:0;color:var(--muted);font-size:12.5px">
+      One provider per line. Format:
+      <span class="mono">host:port:user:pass:ssl</span>
+      or <span class="mono">host|port|user|pass|starttls</span>.
+      Optional From at the end:
+      <span class="mono">host:port:user:pass:ssl:from@domain.com</span>.
+      TLS token: <span class="mono">ssl</span>, <span class="mono">tls</span>,
+      <span class="mono">starttls</span> or <span class="mono">none</span>.
+      Each line is tested before it is saved.
+    </p>
+    <textarea id="import-text" rows="12" spellcheck="false" placeholder="smtp.example.com:465:info@example.com:secret:ssl&#10;smtp.example.com:465:news@example.com:secret:ssl:campaigns@example.com"></textarea>
+    <div class="err" id="import-error"></div>
+    <pre class="mono" id="import-result" style="margin:0;white-space:pre-wrap;display:none"></pre>
+  </div>
+  <div class="actions">
+    <button type="button" id="import-cancel">Cancel</button>
+    <button type="button" class="primary" id="import-save">Test &amp; add all</button>
+  </div>
 </dialog>
 
 <dialog id="test-dialog">
@@ -615,6 +642,8 @@ function renderRelays() {
           ? `<button class="tiny danger" data-act="deactivate" data-id="${escapeHtml(relay.id)}">Off</button>`
           : `<button class="tiny good" data-act="activate" data-id="${escapeHtml(relay.id)}">On</button>`}
         <button class="tiny" data-act="edit" data-id="${escapeHtml(relay.id)}">Edit</button>
+        <button class="tiny" data-act="clone" data-id="${escapeHtml(relay.id)}">Clone</button>
+        <button class="tiny danger" data-act="delete" data-id="${escapeHtml(relay.id)}">Delete</button>
         <button class="tiny" data-act="probe" data-id="${escapeHtml(relay.id)}">Probe</button>
         <button class="tiny" data-act="test" data-id="${escapeHtml(relay.id)}">Test</button>
         <button class="tiny" data-act="detail" data-id="${escapeHtml(relay.id)}">Info</button>
@@ -639,7 +668,7 @@ function updateSelectionUi() {
   const all = $("check-all");
   all.checked = total > 0 && selected.size === total;
   all.indeterminate = selected.size > 0 && selected.size < total;
-  for (const id of ["btn-activate-selected", "btn-deactivate-selected", "btn-only-selected"]) {
+  for (const id of ["btn-activate-selected", "btn-deactivate-selected", "btn-only-selected", "btn-delete-selected"]) {
     $(id).disabled = selected.size === 0;
   }
 }
@@ -815,6 +844,15 @@ $("relay-table").addEventListener("click", async (event) => {
       case "edit": {
         openRelayDialog(RELAYS.find((entry) => entry.id === id));
         return;
+      }
+      case "clone": {
+        const source = RELAYS.find((entry) => entry.id === id);
+        if (source) openRelayDialog(source, true);
+        return;
+      }
+      case "delete": {
+        if (!confirm("Delete provider `" + id + "`? Mail will stop using it immediately.")) return;
+        return act(`/api/relays/${encoded}`, { method: "DELETE" }, id + " deleted");
       }
       case "test": {
         $("test-relay").value = id;
@@ -1008,11 +1046,25 @@ function syncQuotaInput(checkId, inputId, existing) {
   }
 }
 
-function openRelayDialog(relay) {
-  const editing = !!relay;
-  $("relay-dialog-title").textContent = editing ? "Edit SMTP provider" : "Add SMTP provider";
+function nextCloneId(base) {
+  const ids = new Set(RELAYS.map((entry) => entry.id));
+  let id = base + "_copy";
+  let n = 2;
+  while (ids.has(id)) {
+    id = base + "_" + n;
+    n += 1;
+  }
+  return id;
+}
+
+function openRelayDialog(relay, clone) {
+  const editing = !!relay && !clone;
+  $("relay-dialog-title").textContent = clone
+    ? "Clone SMTP provider"
+    : editing ? "Edit SMTP provider" : "Add SMTP provider";
   $("relay-editing").value = editing ? relay.id : "";
-  $("relay-id").value = relay ? relay.id : "";
+  $("relay-clone-from").value = clone && relay ? relay.id : "";
+  $("relay-id").value = clone && relay ? nextCloneId(relay.id) : (relay ? relay.id : "");
   $("relay-id").readOnly = editing;
   $("relay-enabled").checked = relay ? !!relay.active : true;
   $("relay-host").value = relay ? relay.host : "";
@@ -1021,8 +1073,10 @@ function openRelayDialog(relay) {
   $("relay-weight").value = relay ? relay.weight : 1;
   $("relay-user").value = relay && relay.username ? relay.username : "";
   $("relay-password").value = "";
-  $("relay-password").placeholder = editing ? "leave blank to keep current password" : "SMTP password";
-  $("relay-from-same").checked = relay ? !!relay.from_same_as_username : true;
+  $("relay-password").placeholder = (editing || clone)
+    ? "leave blank to keep current password"
+    : "SMTP password";
+  $("relay-from-same").checked = clone ? false : (relay ? !!relay.from_same_as_username : true);
   $("relay-from").value = relay ? relay.from_address : "";
   $("relay-align").checked = relay ? !!relay.align_envelope : false;
   $("relay-limit-minute").checked = !!(relay && relay.minute_limit);
@@ -1046,6 +1100,7 @@ function openRelayDialog(relay) {
 function relayPayload() {
   const username = $("relay-user").value.trim();
   const password = $("relay-password").value;
+  const cloneFrom = $("relay-clone-from").value.trim();
   const sameAsUser = $("relay-from-same").checked;
   const fromAddress = sameAsUser && looksLikeEmail(username)
     ? username
@@ -1066,15 +1121,72 @@ function relayPayload() {
     max_per_hour: $("relay-limit-hour").checked ? optionalNumber($("relay-hour").value) : null,
     max_per_day: $("relay-limit-day").checked ? optionalNumber($("relay-day").value) : null,
   };
-  if (username && (password || $("relay-editing").value)) {
+  if (username && (password || $("relay-editing").value || cloneFrom)) {
     payload.auth = {
       username,
       password: password || "__redacted__",
     };
   }
+  if (cloneFrom) payload.clone_from = cloneFrom;
   return payload;
 }
 
+$("btn-delete-selected").onclick = async () => {
+  const ids = selectedIds();
+  if (!ids.length) return;
+  if (!confirm("Delete " + ids.length + " selected provider(s)? Mail will stop using them immediately.")) return;
+  for (const id of ids) {
+    await act("/api/relays/" + encodeURIComponent(id), { method: "DELETE" });
+  }
+  selected.clear();
+  toast("Selected providers deleted", "ok");
+  await refreshAll();
+};
+$("btn-bulk-import").onclick = () => {
+  $("import-text").value = "";
+  $("import-error").textContent = "";
+  $("import-result").style.display = "none";
+  $("import-result").textContent = "";
+  $("import-dialog").showModal();
+};
+$("import-cancel").onclick = () => $("import-dialog").close();
+$("import-save").onclick = async () => {
+  $("import-error").textContent = "";
+  $("import-result").style.display = "none";
+  const text = $("import-text").value;
+  if (!text.trim()) {
+    $("import-error").textContent = "Paste at least one host:port:user:pass:ssl line.";
+    return;
+  }
+  $("import-save").disabled = true;
+  $("import-save").textContent = "Testing…";
+  try {
+    const result = await api("/api/relays/import", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    const lines = [];
+    if (result.added_count) lines.push("Added: " + (result.added || []).join(", "));
+    if (result.failed_count) {
+      lines.push("Failed:");
+      for (const row of result.failed || []) {
+        lines.push("  line " + row.line + ": " + row.error);
+      }
+    }
+    $("import-result").textContent = lines.join("\n");
+    $("import-result").style.display = "block";
+    if (result.added_count) {
+      toast("Added " + result.added_count + " SMTP provider(s)", "ok");
+      await refreshAll();
+    }
+    if (!result.failed_count) $("import-dialog").close();
+  } catch (error) {
+    $("import-error").textContent = error.message;
+  } finally {
+    $("import-save").disabled = false;
+    $("import-save").textContent = "Test & add all";
+  }
+};
 $("btn-add-relay").onclick = () => openRelayDialog(null);
 $("relay-cancel").onclick = () => $("relay-dialog").close();
 $("relay-from-same").onchange = syncFromSame;
