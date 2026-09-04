@@ -340,13 +340,20 @@
         </div>
       </div>
       <div class="row" style="margin-top:10px"><span>Description</span><input type="text" id="relay-desc" placeholder="Primary transactional identity"></div>
+      <div class="row" style="margin-top:8px">
+        <span>TLS certs</span>
+        <label class="inline" style="margin-top:8px">
+          <input type="checkbox" id="relay-insecure-tls">
+          Accept invalid TLS certificates (self-signed / hostname mismatch)
+        </label>
+      </div>
       <div class="err" id="relay-form-error"></div>
     </div>
     <div class="actions">
       <button type="button" class="danger hidden" id="relay-delete">Delete</button>
       <div class="spacer"></div>
       <button type="button" id="relay-cancel">Cancel</button>
-      <button type="submit" class="primary" id="relay-save">Save provider</button>
+      <button type="submit" class="primary" id="relay-save">Test &amp; save</button>
     </div>
   </form>
 </dialog>
@@ -1025,6 +1032,7 @@ function openRelayDialog(relay) {
   $("relay-limit-day").checked = !!(relay && relay.day_limit);
   $("relay-day").value = relay && relay.day_limit ? relay.day_limit : "";
   $("relay-desc").value = relay && relay.description ? relay.description : "";
+  $("relay-insecure-tls").checked = relay ? !!relay.allow_invalid_certs : false;
   $("relay-form-error").textContent = "";
   $("relay-delete").classList.toggle("hidden", !editing);
   syncFromSame();
@@ -1053,6 +1061,7 @@ function relayPayload() {
     weight: Number($("relay-weight").value) || 1,
     enabled: $("relay-enabled").checked,
     description: $("relay-desc").value.trim() || null,
+    allow_invalid_certs: $("relay-insecure-tls").checked,
     max_per_minute: $("relay-limit-minute").checked ? optionalNumber($("relay-minute").value) : null,
     max_per_hour: $("relay-limit-hour").checked ? optionalNumber($("relay-hour").value) : null,
     max_per_day: $("relay-limit-day").checked ? optionalNumber($("relay-day").value) : null,
@@ -1111,6 +1120,7 @@ $("relay-form").onsubmit = async (event) => {
     return;
   }
   $("relay-save").disabled = true;
+  $("relay-save").textContent = "Testing SMTP…";
   try {
     const path = editing
       ? "/api/relays/" + encodeURIComponent(editing)
@@ -1124,8 +1134,10 @@ $("relay-form").onsubmit = async (event) => {
     await refreshAll();
   } catch (error) {
     $("relay-form-error").textContent = error.message;
+    toast(error.message, "bad");
   } finally {
     $("relay-save").disabled = false;
+    $("relay-save").textContent = "Test & save";
   }
 };
 $("relay-delete").onclick = async () => {

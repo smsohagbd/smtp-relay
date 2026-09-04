@@ -170,8 +170,23 @@ fn build_envelope(
 
 /// Connects, greets and disconnects, without sending mail.
 pub async fn probe(relay: &RelayRuntime) -> Result<Duration, DeliveryError> {
+    probe_transport(relay.transport()).await
+}
+
+/// Builds a throwaway transport and probes it. Used to reject a new SMTP
+/// provider before it is written into the pool.
+pub async fn probe_config(
+    config: &RelayConfig,
+    fallback_timeout_seconds: u64,
+) -> Result<Duration, DeliveryError> {
+    let transport = build_transport(config, fallback_timeout_seconds)
+        .map_err(DeliveryError::permanent)?;
+    probe_transport(&transport).await
+}
+
+async fn probe_transport(transport: &Transport) -> Result<Duration, DeliveryError> {
     let started = Instant::now();
-    match relay.transport().test_connection().await {
+    match transport.test_connection().await {
         Ok(true) => Ok(started.elapsed()),
         Ok(false) => Err(DeliveryError::transient(
             "relay did not accept the connection test",

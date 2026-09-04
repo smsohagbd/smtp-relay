@@ -89,7 +89,7 @@ async fn route(state: Arc<AppState>, request: Request) -> Reply {
 
         // -- relays --------------------------------------------------------
         ("GET", ["api", "relays"]) => list_relays(&state).into(),
-        ("POST", ["api", "relays"]) => add_relay(&state, &request).into(),
+        ("POST", ["api", "relays"]) => add_relay(&state, &request).await.into(),
         ("POST", ["api", "relays", "activate-all"]) => {
             bulk_activation(&state, &request, BulkAction::ActivateAll).into()
         }
@@ -99,7 +99,7 @@ async fn route(state: Arc<AppState>, request: Request) -> Reply {
         ("POST", ["api", "relays", "bulk"]) => bulk(&state, &request).into(),
         ("POST", ["api", "relays", "reset-stats"]) => reset_all_stats(&state).into(),
         ("GET", ["api", "relays", id]) => get_relay(&state, id).into(),
-        ("PUT", ["api", "relays", id]) => update_relay(&state, &request, id).into(),
+        ("PUT", ["api", "relays", id]) => update_relay(&state, &request, id).await.into(),
         ("DELETE", ["api", "relays", id]) => delete_relay(&state, &request, id).into(),
         ("POST", ["api", "relays", id, "activate"]) => {
             set_activation(&state, &request, id, Some(true)).into()
@@ -777,7 +777,23 @@ async fn send_test(state: &Arc<AppState>, request: &Request, id: &str) -> Respon
     }
 }
 
-fn add_relay(state: &Arc<AppState>, request: &Request) -> Response {
+async fn verify_smtp(state: &Arc<AppState>, relay: &RelayConfig) -> Result<u64, Response> {
+    let timeout = state.config().server.timeout_seconds;
+    match sender::probe_config(relay, timeout).await {
+        Ok(latency) => Ok(latency.as_millis() as u64),
+        Err(error) => Err(Response::error(
+            422,
+            &format!(
+                "SMTP test failed for {}:{} ({}) — {error}. Provider was not saved.",
+                relay.host,
+                relay.port,
+                relay.tls.as_str()
+            ),
+        )),
+    }
+}
+
+async fn add_relay(state: &Arc<AppState>, request: &Request) -> Response {
     let mut relay: RelayConfig = match request.body_json() {
         Ok(relay) => relay,
         Err(error) => return Response::error(400, &error),
@@ -788,22 +804,28 @@ fn add_relay(state: &Arc<AppState>, request: &Request) -> Response {
         return Response::error(409, &format!("a relay with id `{}` already exists", relay.id));
     }
 
+    let latency_ms = match verify_smtp(state, &relay).await {
+        Ok(ms) => ms,
+        Err(response) => return response,
+    };
+
     let id = relay.id.clone();
     match state.edit_config(should_persist(state, request), move |config| {
         config.relays.push(relay)
     }) {
         Ok(_) => {
-            tracing::info!(relay = %id, "relay added");
-            state
-                .events
-                .publish(EventKind::Relay, json!({ "action": "added", "id": id }));
+            tracing::info!(relay = %id, latency_ms, "relay added after a successful SMTP test");
+            state.events.publish(
+                EventKind::Relay,
+                json!({ "action": "added", "id": id, "probe_ms": latency_ms }),
+            );
             list_relays(state)
         }
         Err(error) => Response::error(422, &error),
     }
 }
 
-fn update_relay(state: &Arc<AppState>, request: &Request, id: &str) -> Response {
+async fn update_relay(state: &Arc<AppState>, request: &Request, id: &str) -> Response {
     let mut relay: RelayConfig = match request.body_json() {
         Ok(relay) => relay,
         Err(error) => return Response::error(400, &error),
@@ -836,13 +858,16 @@ fn update_relay(state: &Arc<AppState>, request: &Request, id: &str) -> Response 
         relay.max_concurrent = existing.max_concurrent;
         relay.timeout_seconds = existing.timeout_seconds;
         relay.helo_name = existing.helo_name;
-        relay.allow_invalid_certs = existing.allow_invalid_certs;
         relay.tags = existing.tags;
         if relay.auth.is_none() {
             relay.auth = existing.auth;
         }
     }
     relay.sync_from_identity();
+
+    if let Err(response) = verify_smtp(state, &relay).await {
+        return response;
+    }
 
     let target = id.to_string();
     match state.edit_config(should_persist(state, request), move |config| {
