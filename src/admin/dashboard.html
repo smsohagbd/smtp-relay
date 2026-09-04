@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SMTP Relay — Control Panel</title>
 <style>
   :root {
@@ -119,7 +119,52 @@
   .err { color: var(--bad); }
   .hidden { display: none !important; }
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  @media (max-width: 640px) { .grid-2 { grid-template-columns: 1fr; } }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .relay-cards { display: none; }
+  .relay-card {
+    padding: 14px; border-bottom: 1px solid var(--border);
+  }
+  .relay-card:last-child { border-bottom: 0; }
+  .relay-card-top { display: flex; align-items: flex-start; gap: 10px; }
+  .relay-card-meta { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
+  .relay-card-stats {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+    margin: 10px 0; font-size: 12px; color: var(--muted);
+  }
+  .relay-card-stats b { display: block; color: var(--text); font-size: 16px; }
+  .relay-card-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+  @media (max-width: 860px) {
+    header, main { padding-left: 12px; padding-right: 12px; }
+    header { padding-top: max(10px, env(safe-area-inset-top)); gap: 10px; }
+    header h1 { width: 100%; }
+    main { padding-bottom: 80px; }
+    .cards { grid-template-columns: repeat(2, 1fr); }
+    .panel-head { gap: 8px; }
+    .panel-head button { min-height: 40px; }
+    button.tiny { min-height: 36px; padding: 6px 10px; }
+    .desktop-table { display: none; }
+    .relay-cards { display: block; }
+    dialog {
+      width: 100%; max-width: 100%; min-width: 0; height: 100%; max-height: 100%;
+      border-radius: 0; margin: 0;
+    }
+    #import-dialog { max-width: 100%; }
+    dialog .panel-body { overflow: auto; }
+    .actions { flex-wrap: wrap; position: sticky; bottom: 0; background: var(--panel); }
+    .actions button { flex: 1; min-height: 44px; }
+    #toast { left: 12px; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); max-width: none; }
+    select, input[type=text], input[type=email], input[type=password], input[type=number], textarea {
+      font-size: 16px;
+    }
+    #login-card { width: 100%; min-height: 100%; border-radius: 0; padding: 28px 18px; }
+    .tabs { overflow-x: auto; flex-wrap: nowrap; }
+    .tabs button { flex: 0 0 auto; }
+  }
+  @media (max-width: 640px) {
+    .grid-2 { grid-template-columns: 1fr; }
+    .cards { grid-template-columns: 1fr 1fr; }
+  }
 
   #login-screen {
     position: fixed; inset: 0; z-index: 50;
@@ -652,12 +697,47 @@ function renderRelays() {
     </tr>`;
   }).join("");
 
-  $("relay-table").innerHTML = `<table>
+  const cards = RELAYS.map((relay) => {
+    const checked = selected.has(relay.id) ? "checked" : "";
+    const latency = relay.average_latency_ms ? Math.round(relay.average_latency_ms) + " ms" : "—";
+    const error = relay.last_error
+      ? `<div class="err mono" style="font-size:12px;margin-top:6px">${escapeHtml(relay.last_error)}</div>`
+      : "";
+    return `<article class="relay-card">
+      <div class="relay-card-top">
+        <input type="checkbox" class="relay-check" data-id="${escapeHtml(relay.id)}" ${checked}>
+        <div style="flex:1;min-width:0">
+          <div><strong>${escapeHtml(relay.id)}</strong> ${relayStatusPill(relay)}</div>
+          <div class="relay-card-meta mono">${escapeHtml(relay.host)}:${relay.port} · ${escapeHtml(relay.tls)}</div>
+          <div class="mono" style="font-size:12px">${escapeHtml(relay.from_address)}</div>
+        </div>
+      </div>
+      <div class="relay-card-stats">
+        <div><b>${num(relay.sent)}</b>sent</div>
+        <div><b>${num(relay.failed)}</b>failed</div>
+        <div><b>${latency}</b>latency</div>
+      </div>
+      <div class="relay-card-actions">
+        ${relay.active
+          ? `<button class="tiny danger" data-act="deactivate" data-id="${escapeHtml(relay.id)}">Off</button>`
+          : `<button class="tiny good" data-act="activate" data-id="${escapeHtml(relay.id)}">On</button>`}
+        <button class="tiny" data-act="edit" data-id="${escapeHtml(relay.id)}">Edit</button>
+        <button class="tiny" data-act="clone" data-id="${escapeHtml(relay.id)}">Clone</button>
+        <button class="tiny danger" data-act="delete" data-id="${escapeHtml(relay.id)}">Delete</button>
+        <button class="tiny" data-act="probe" data-id="${escapeHtml(relay.id)}">Probe</button>
+        <button class="tiny" data-act="test" data-id="${escapeHtml(relay.id)}">Test</button>
+      </div>
+      ${error}
+    </article>`;
+  }).join("");
+
+  $("relay-table").innerHTML = `<div class="table-wrap desktop-table"><table>
     <thead><tr>
       <th style="width:28px"></th><th>Relay</th><th>Identity</th><th>Status</th>
       <th class="num">Share</th><th class="num">Sent</th><th class="num">Defer</th><th class="num">Fail</th>
       <th class="num">Latency</th><th class="num">In flight</th><th class="num">Quota</th><th></th>
-    </tr></thead><tbody>${rows}</tbody></table>`;
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="relay-cards">${cards}</div>`;
 
   updateSelectionUi();
 }
@@ -692,11 +772,11 @@ function renderMessages(messages) {
     <td><button class="tiny" data-msg="${escapeHtml(message.id)}">Info</button></td>
   </tr>`).join("");
 
-  $("messages-table").innerHTML = `<table>
+  $("messages-table").innerHTML = `<div class="table-wrap"><table>
     <thead><tr>
       <th>Time</th><th>Status</th><th>From</th><th>To</th><th>Subject</th>
       <th>Relay</th><th class="num">Try</th><th class="num">Latency</th><th>Error</th><th></th>
-    </tr></thead><tbody>${rows}</tbody></table>`;
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function renderQueue(queue) {
@@ -719,11 +799,11 @@ function renderQueue(queue) {
     </td>
   </tr>`).join("");
 
-  $("queue-table").innerHTML = `<table>
+  $("queue-table").innerHTML = `<div class="table-wrap"><table>
     <thead><tr>
       <th>Id</th><th>From</th><th>To</th><th>Subject</th>
       <th class="num">Try</th><th class="num">Retry in</th><th>Tried</th><th>Last error</th><th></th>
-    </tr></thead><tbody>${rows}</tbody></table>`;
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 // --- loading ----------------------------------------------------------------

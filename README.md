@@ -226,48 +226,15 @@ curl -X POST localhost:8025/api/relays/relay_node_1/test \
 
 ### systemd
 
-```ini
-# /etc/systemd/system/smtp-relay.service
-[Unit]
-Description=SMTP proxy and load-balancing relay
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=smtp-relay
-Group=smtp-relay
-ExecStart=/usr/local/bin/smtp-relay --config /etc/smtp-relay/config.yaml
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-RestartSec=2s
-WorkingDirectory=/var/lib/smtp-relay
-
-# The spool and log directories are the only writable paths needed.
-StateDirectory=smtp-relay
-LogsDirectory=smtp-relay
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-RestrictAddressFamilies=AF_INET AF_INET6
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-```
+`./setup.sh` builds the binary, writes `config.yaml`, installs
+`/usr/local/bin/smtp-relay`, enables `smtp-relay.service`, and starts it.
+You do not need to write a unit file by hand.
 
 ```bash
-sudo install -m 0755 target/release/smtp-relay /usr/local/bin/
-sudo install -d -m 0750 /etc/smtp-relay
-sudo install -m 0640 config.yaml /etc/smtp-relay/config.yaml   # contains passwords
-sudo systemctl enable --now smtp-relay
-sudo systemctl reload smtp-relay                               # SIGHUP = hot reload
+sudo systemctl status smtp-relay
+sudo systemctl restart smtp-relay
+sudo journalctl -u smtp-relay -f
 ```
-
-Set `queue.directory: /var/lib/smtp-relay/spool` and, if you want files,
-`logging.directory: /var/log/smtp-relay` to match the unit above.
 
 ### Docker
 
