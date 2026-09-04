@@ -145,6 +145,11 @@ impl Response {
     }
 
     fn serialize(&self, keep_alive: bool) -> Vec<u8> {
+        self.serialize_parts(keep_alive, false)
+    }
+
+    /// `head_only` keeps GET headers (including Content-Length) but omits the body.
+    fn serialize_parts(&self, keep_alive: bool, head_only: bool) -> Vec<u8> {
         let mut head = String::with_capacity(256);
         head.push_str(&format!(
             "HTTP/1.1 {} {}\r\n",
@@ -165,7 +170,9 @@ impl Response {
         head.push_str("\r\n");
 
         let mut out = head.into_bytes();
-        out.extend_from_slice(&self.body);
+        if !head_only {
+            out.extend_from_slice(&self.body);
+        }
         out
     }
 }
@@ -277,7 +284,7 @@ async fn serve_connection(
     let mut reader = LineReader::new(read_half);
 
     loop {
-        let request = match tokio::time::timeout(
+        let mut request = match tokio::time::timeout(
             KEEPALIVE_TIMEOUT,
             read_request(&mut reader, peer),
         )
@@ -296,10 +303,16 @@ async fn serve_connection(
         };
 
         let keep_alive = wants_keep_alive(&request);
+        let head_only = request.method == "HEAD";
+        if head_only {
+            request.method = "GET".to_string();
+        }
 
         match handler(Arc::clone(&state), request).await {
             Reply::Complete(response) => {
-                write_half.write_all(&response.serialize(keep_alive)).await?;
+                write_half
+                    .write_all(&response.serialize_parts(keep_alive, head_only))
+                    .await?;
                 write_half.flush().await?;
                 if !keep_alive {
                     return Ok(());
@@ -675,6 +688,18 @@ mod tests {
         assert!(wire.contains("Connection: keep-alive\r\n"));
         assert!(wire.contains(&format!("Content-Length: {}\r\n", response.body.len())));
         assert!(wire.ends_with("{\"message\":\"done\",\"ok\":true}"));
+    }
+
+    #[test]
+    fn head_responses_keep_length_but_omit_the_body() {
+        let response = Response::ok_message("done");
+        let get = response.serialize_parts(true, false);
+        let head = response.serialize_parts(true, true);
+        assert!(head.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(head.windows(4).any(|w| w == b"\r\n\r\n"));
+        assert!(head.ends_with(b"\r\n\r\n"));
+        assert!(head.len() < get.len());
+        assert!(String::from_utf8_lossy(&head).contains("Content-Length:"));
     }
 
     #[test]

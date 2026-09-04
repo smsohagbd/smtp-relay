@@ -49,7 +49,7 @@ async fn route(state: Arc<AppState>, request: Request) -> Reply {
         return Reply::Complete(
             Response::new(204, "text/plain", Vec::new())
                 .with_header("Access-Control-Allow-Origin", "*")
-                .with_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+                .with_header("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, DELETE, OPTIONS")
                 .with_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
                 .with_header("Access-Control-Max-Age", "600"),
         );
