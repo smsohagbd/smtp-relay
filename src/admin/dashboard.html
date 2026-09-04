@@ -365,8 +365,8 @@
         <div class="row" style="grid-column:1/-1">
           <span>MAIL FROM</span>
           <label class="inline" style="margin-top:8px">
-            <input type="checkbox" id="relay-align">
-            Align envelope with From address (SPF)
+            <input type="checkbox" id="relay-align" checked>
+            Rewrite MAIL FROM to the From address (needed for most SMTP hosts)
           </label>
         </div>
         <div class="row"><span>Limit / minute</span>
@@ -762,7 +762,7 @@ function renderMessages(messages) {
   const rows = messages.map((message) => `<tr>
     <td class="mono" style="font-size:11.5px">${clock(message.received_at)}</td>
     <td><span class="pill ${STATUS_KIND[message.status] || "mute"}">${escapeHtml(message.status)}</span></td>
-    <td class="mono" style="font-size:11.5px">${escapeHtml(message.original_from)}</td>
+    <td class="mono" style="font-size:11.5px">${escapeHtml(message.from_header || message.original_from)}</td>
     <td>${escapeHtml((message.recipients || []).slice(0, 2).join(", "))}${(message.recipients || []).length > 2 ? ` +${message.recipients.length - 2}` : ""}</td>
     <td>${escapeHtml((message.subject || "").slice(0, 60))}</td>
     <td class="mono" style="font-size:11.5px">${escapeHtml(message.relay_id || "—")}</td>
@@ -1158,7 +1158,7 @@ function openRelayDialog(relay, clone) {
     : "SMTP password";
   $("relay-from-same").checked = clone ? false : (relay ? !!relay.from_same_as_username : true);
   $("relay-from").value = relay ? relay.from_address : "";
-  $("relay-align").checked = relay ? !!relay.align_envelope : false;
+  $("relay-align").checked = relay ? !!relay.align_envelope : true;
   $("relay-limit-minute").checked = !!(relay && relay.minute_limit);
   $("relay-minute").value = relay && relay.minute_limit ? relay.minute_limit : "";
   $("relay-limit-hour").checked = !!(relay && relay.hour_limit);

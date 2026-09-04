@@ -236,13 +236,11 @@ logging:
 # ---------------------------------------------------------------------------
 # relays:
 # ---------------------------------------------------------------------------
-# Each entry is one upstream identity. By default only the `From` address is
-# rewritten to this relay's identity; the original display name, MAIL FROM
-# and DKIM/ARC signatures are left alone. Set `align_envelope: true` on a
-# provider if you want MAIL FROM rewritten to match From (SPF alignment).
-#
-# `from_same_as_username: true` (the default) copies From from the SMTP
-# username when that username is an email address, so you do not type it twice.
+# Each entry is one upstream identity. The `From` *address* is rewritten to
+# this relay's identity; the original display name and DKIM/ARC stay as they
+# arrived. When `from_same_as_username` is on (the default) or `align_envelope`
+# is on, MAIL FROM is rewritten to the same address so cPanel / Exim hosts
+# that reject a foreign envelope sender will accept the mail.
 #
 # With strategy "weighted", `weight` is a relative share - the values below
 # happen to sum to 100, so they read as percentages.
@@ -257,9 +255,9 @@ relays:
       username: "mailer@domain1.com"
       password: "secret_password_1"
       # mechanism: "login"     # default offers PLAIN then LOGIN
-    from_same_as_username: true  # From is copied from username
+    from_same_as_username: true  # From + MAIL FROM use the SMTP username
     # from_address: "noreply@domain1.com"  # only needed when the checkbox is off
-    align_envelope: false      # true = rewrite MAIL FROM to the From address
+    align_envelope: true       # false only if a custom From must keep the original MAIL FROM
     weight: 40                 # 40% of traffic
     priority: 100              # lower wins under the failover strategy
     enabled: true              # toggled live from the dashboard, persisted here
@@ -283,7 +281,7 @@ relays:
       password: "secret_password_2"
     from_same_as_username: false
     from_address: "newsletter@domain2.com"
-    align_envelope: false
+    align_envelope: true
     weight: 60                 # 60% of traffic
     priority: 200
     enabled: true

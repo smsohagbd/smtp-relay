@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Interactive first-run setup. Empty answers keep the defaults:
-#   admin / admin, SMTP 1025, dashboard 8025
+# One-shot installer: OS packages, Rust, config, build, systemd service.
+# Empty answers keep the defaults: admin / admin, SMTP 1025, dashboard 8025
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -10,6 +10,25 @@ DEFAULT_USER="admin"
 DEFAULT_PASS="admin"
 DEFAULT_SMTP="1025"
 DEFAULT_WEB="8025"
+
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+elif command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  SUDO=""
+fi
+
+as_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif [ -n "$SUDO" ]; then
+    "$SUDO" "$@"
+  else
+    echo "Need root (or sudo) to install packages: $*" >&2
+    return 1
+  fi
+}
 
 prompt() {
   local name="$1"
@@ -36,9 +55,67 @@ is_port() {
   [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
+load_cargo() {
+  if [ -f "$HOME/.cargo/env" ]; then
+    # shellcheck disable=SC1091
+    . "$HOME/.cargo/env"
+  fi
+  export PATH="$HOME/.cargo/bin:$PATH"
+}
+
+install_system_packages() {
+  echo
+  echo "==> Installing build dependencies (compiler, OpenSSL, curl)…"
+
+  if command -v apt-get >/dev/null 2>&1; then
+    as_root apt-get update -y
+    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates curl git build-essential pkg-config libssl-dev
+  elif command -v dnf >/dev/null 2>&1; then
+    as_root dnf install -y gcc gcc-c++ make pkgconf-pkg-config openssl-devel curl git ca-certificates
+  elif command -v yum >/dev/null 2>&1; then
+    as_root yum install -y gcc gcc-c++ make pkgconfig openssl-devel curl git ca-certificates
+  elif command -v apk >/dev/null 2>&1; then
+    as_root apk add --no-cache ca-certificates curl git build-base pkgconf openssl-dev
+  elif command -v pacman >/dev/null 2>&1; then
+    as_root pacman -Sy --noconfirm --needed base-devel openssl curl git pkgconf
+  else
+    echo "No known package manager (apt/dnf/yum/apk/pacman)."
+    echo "Install gcc, make, pkg-config, libssl-dev and curl, then re-run."
+  fi
+}
+
+install_rust() {
+  load_cargo
+  if command -v rustc >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
+    echo "==> Rust already installed: $(rustc --version)"
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is required to install Rust." >&2
+    exit 1
+  fi
+
+  echo "==> Installing Rust (rustup, stable)…"
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+  load_cargo
+
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "Rust install finished but cargo is not on PATH. Open a new shell or run:" >&2
+    echo "  source \"\$HOME/.cargo/env\"" >&2
+    exit 1
+  fi
+  echo "==> $(rustc --version)"
+}
+
 echo "smtp-relay setup"
-echo "Press Enter to keep each default."
+echo "This script installs dependencies, writes config.yaml, builds the"
+echo "binary and enables a systemd service. Press Enter to keep each default."
 echo
+
+install_system_packages
+install_rust
 
 ADMIN_USER="$(prompt "Admin username" "$DEFAULT_USER")"
 ADMIN_PASS="$(prompt "Admin password" "$DEFAULT_PASS")"
@@ -107,26 +184,15 @@ EOF
   echo "  Dashboard     : http://0.0.0.0:${WEB_PORT}/  (user ${ADMIN_USER})"
 fi
 
-if [ -f "$HOME/.cargo/env" ]; then
-  # shellcheck disable=SC1091
-  . "$HOME/.cargo/env"
-fi
-
-if command -v cargo >/dev/null 2>&1; then
-  echo
-  echo "Building release binary…"
-  cargo build --release
-else
-  echo
-  echo "cargo not found; install Rust or build later."
-fi
+load_cargo
+echo
+echo "==> Building release binary…"
+cargo build --release
 
 BIN="$ROOT/target/release/smtp-relay"
 if [ ! -x "$BIN" ]; then
-  echo
-  echo "No binary at ${BIN}. Service was not installed."
-  echo "After cargo build --release, run ./setup.sh again."
-  exit 0
+  echo "Build finished but ${BIN} is missing." >&2
+  exit 1
 fi
 
 if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
@@ -136,26 +202,20 @@ if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
   exit 0
 fi
 
-if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-else
-  if command -v sudo >/dev/null 2>&1; then
-    SUDO="sudo"
-  else
-    echo "Need root to install the systemd service (no sudo)."
-    echo "Start with: ${BIN}"
-    exit 0
-  fi
+if [ "$(id -u)" -ne 0 ] && [ -z "$SUDO" ]; then
+  echo "Need root to install the systemd service."
+  echo "Start with: ${BIN}"
+  exit 0
 fi
 
 echo
-echo "Installing systemd service…"
-$SUDO install -m 0755 "$BIN" /usr/local/bin/smtp-relay
-$SUDO mkdir -p /etc/smtp-relay /var/lib/smtp-relay/spool
-$SUDO cp "$OUT" /etc/smtp-relay/config.yaml
-$SUDO chmod 640 /etc/smtp-relay/config.yaml
+echo "==> Installing systemd service…"
+as_root install -m 0755 "$BIN" /usr/local/bin/smtp-relay
+as_root mkdir -p /etc/smtp-relay /var/lib/smtp-relay/spool
+as_root cp "$OUT" /etc/smtp-relay/config.yaml
+as_root chmod 640 /etc/smtp-relay/config.yaml
 
-$SUDO tee /etc/systemd/system/smtp-relay.service >/dev/null <<'UNIT'
+as_root tee /etc/systemd/system/smtp-relay.service >/dev/null <<'UNIT'
 [Unit]
 Description=SMTP proxy and load-balancing relay
 After=network-online.target
@@ -173,21 +233,22 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 UNIT
 
-$SUDO systemctl daemon-reload
-$SUDO systemctl enable smtp-relay
-if $SUDO systemctl restart smtp-relay; then
-  $SUDO systemctl --no-pager --full status smtp-relay || true
+as_root systemctl daemon-reload
+as_root systemctl enable smtp-relay
+if as_root systemctl restart smtp-relay; then
+  as_root systemctl --no-pager --full status smtp-relay || true
+  HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
   echo
-  echo "smtp-relay is installed and running as a systemd service."
+  echo "smtp-relay is installed and running."
+  echo "  Dashboard : http://${HOST_IP:-127.0.0.1}:${WEB_PORT}/"
+  echo "  SMTP      : ${HOST_IP:-127.0.0.1}:${SMTP_PORT}  user ${ADMIN_USER}"
+  echo
   echo "  sudo systemctl status smtp-relay"
   echo "  sudo systemctl restart smtp-relay"
   echo "  sudo journalctl -u smtp-relay -f"
-  echo
-  echo "Dashboard: http://$(hostname -I 2>/dev/null | awk '{print $1}'):${WEB_PORT}/"
-  echo "SMTP AUTH : ${ADMIN_USER}  port ${SMTP_PORT}"
 else
   echo
-  echo "Service installed but failed to start. If a foreground smtp-relay is still"
-  echo "running, stop it (Ctrl+C) and run: sudo systemctl restart smtp-relay"
+  echo "Service installed but failed to start. Stop any foreground smtp-relay"
+  echo "(Ctrl+C) and run: sudo systemctl restart smtp-relay"
   echo "Logs: sudo journalctl -u smtp-relay -e"
 fi

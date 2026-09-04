@@ -5,10 +5,11 @@
 //! links, MIME boundaries and transfer encodings are bit-for-bit identical.
 //!
 //! By default the only mutation is the `From` *address*. The original display
-//! name, `MAIL FROM`, DKIM/ARC signatures and the rest of the header block are
-//! left alone. Per-relay `align_envelope` optionally rewrites the envelope
-//! sender to match the new From address (SPF alignment). Optional rewrite
-//! flags can still inject `Reply-To`, strip signatures, or add trace headers.
+//! name and DKIM/ARC signatures stay as they arrived. When the relay sends as
+//! its SMTP username (`from_same_as_username`) or `align_envelope` is on,
+//! `MAIL FROM` is rewritten to that same address so providers that reject
+//! foreign envelope senders (cPanel / Exim `501 5.5.4`) accept the mail.
+//! `Sender` and `Return-Path` follow the rewritten From when present.
 
 use std::net::IpAddr;
 
@@ -48,8 +49,8 @@ pub struct RewriteContext<'a> {
 pub struct Rewritten {
     /// Full RFC 5322 message ready for `DATA`.
     pub raw: Vec<u8>,
-    /// Value to use for `MAIL FROM`. Matches the original envelope unless
-    /// this relay has `align_envelope` enabled.
+    /// Value to use for `MAIL FROM`. Matches the rewritten From address when
+    /// the relay sends as its SMTP username or `align_envelope` is on.
     pub envelope_from: String,
     /// Mailbox found in the inbound `From`, if any. The activity log records
     /// this before the rewrite runs, so only the tests read it back here.
@@ -131,8 +132,13 @@ pub fn rewrite(raw: &[u8], ctx: &RewriteContext<'_>) -> Result<Rewritten, Messag
         original_from_raw.clone().unwrap_or_default()
     };
 
-    // Envelope: alignment is opt-in per relay. Off keeps the client's MAIL FROM.
-    let envelope_from = if ctx.relay.align_envelope {
+    // Most authenticated SMTP hosts refuse MAIL FROM that is not the login.
+    // Sending-as-username therefore always rewrites the envelope. The
+    // align_envelope checkbox covers the custom-From case. Off + custom From
+    // keeps the client's MAIL FROM (bounce path stays with the submitter).
+    let align_envelope = ctx.rewrite.rewrite_from
+        && (ctx.relay.align_envelope || ctx.relay.from_same_as_username);
+    let envelope_from = if align_envelope {
         notes.push(format!("aligned MAIL FROM to {identity}"));
         identity.clone()
     } else if !ctx.original_sender.is_empty() && looks_like_email(ctx.original_sender) {
@@ -140,6 +146,22 @@ pub fn rewrite(raw: &[u8], ctx: &RewriteContext<'_>) -> Result<Rewritten, Messag
     } else {
         identity.clone()
     };
+
+    if ctx.rewrite.rewrite_from {
+        if message.has("sender") {
+            let sender = format!("<{identity}>");
+            message.set("Sender", &sender);
+            notes.push(format!("rewrote Sender to {identity}"));
+        }
+        if message.has("return-path") {
+            message.set("Return-Path", format!("<{identity}>"));
+            notes.push(format!("rewrote Return-Path to {identity}"));
+        }
+        if message.has("x-sender") {
+            message.set("X-Sender", &identity);
+            notes.push(format!("rewrote X-Sender to {identity}"));
+        }
+    }
 
     // -- 3. Signatures ----------------------------------------------------
     if ctx.rewrite.strip_dkim {
@@ -351,7 +373,10 @@ Lz48L2JvZHk+PC9odG1sPg==\r\n\
             after.value("from").unwrap(),
             "Acme Marketing <noreply@domain1.com>"
         );
-        assert_eq!(result.envelope_from, "campaigns@acme-mautic.io");
+        assert_eq!(
+            result.envelope_from, "noreply@domain1.com",
+            "from_same_as_username defaults on, so MAIL FROM follows From"
+        );
         assert_eq!(
             result.original_from.as_ref().unwrap().address,
             "campaigns@acme-mautic.io"
@@ -535,15 +560,44 @@ Lz48L2JvZHk+PC9odG1sPg==\r\n\
     }
 
     #[test]
-    fn envelope_stays_original_unless_alignment_is_on() {
+    fn envelope_stays_original_only_for_custom_from_without_alignment() {
         let cfg = RewriteConfig::default();
         let mut relay_cfg = relay();
+        relay_cfg.from_same_as_username = false;
+        relay_cfg.align_envelope = false;
         let result = rewrite(MAUTIC, &context(&cfg, &relay_cfg)).unwrap();
         assert_eq!(result.envelope_from, "campaigns@acme-mautic.io");
 
         relay_cfg.align_envelope = true;
         let aligned = rewrite(MAUTIC, &context(&cfg, &relay_cfg)).unwrap();
         assert_eq!(aligned.envelope_from, "noreply@domain1.com");
+    }
+
+    #[test]
+    fn sending_as_username_rewrites_envelope_even_when_align_is_off() {
+        let cfg = RewriteConfig::default();
+        let mut relay_cfg = relay();
+        relay_cfg.from_same_as_username = true;
+        relay_cfg.align_envelope = false;
+        let result = rewrite(MAUTIC, &context(&cfg, &relay_cfg)).unwrap();
+        assert_eq!(result.envelope_from, "noreply@domain1.com");
+        assert_eq!(
+            Message::parse(&result.raw).unwrap().value("from").unwrap(),
+            "Acme Marketing <noreply@domain1.com>"
+        );
+    }
+
+    #[test]
+    fn sender_and_return_path_follow_rewritten_from() {
+        let raw = b"From: A <a@orig.io>\r\nSender: a@orig.io\r\nReturn-Path: <a@orig.io>\r\nX-Sender: a@orig.io\r\nSubject: x\r\n\r\nbody"
+            as &[u8];
+        let cfg = RewriteConfig::default();
+        let relay_cfg = relay();
+        let result = rewrite(raw, &context(&cfg, &relay_cfg)).unwrap();
+        let after = Message::parse(&result.raw).unwrap();
+        assert_eq!(after.value("sender").unwrap(), "<noreply@domain1.com>");
+        assert_eq!(after.value("return-path").unwrap(), "<noreply@domain1.com>");
+        assert_eq!(after.value("x-sender").unwrap(), "noreply@domain1.com");
     }
 
     #[test]

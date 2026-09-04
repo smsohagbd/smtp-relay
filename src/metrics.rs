@@ -307,6 +307,9 @@ pub struct MessageRecord {
     pub status: MessageStatus,
     /// Original `From` mailbox as submitted.
     pub original_from: String,
+    /// `From` header actually handed to the upstream relay.
+    #[serde(default)]
+    pub from_header: String,
     /// Envelope sender used upstream.
     pub envelope_from: String,
     pub reply_to: Option<String>,
@@ -331,6 +334,7 @@ impl MessageRecord {
             updated_at: now,
             status: MessageStatus::Accepted,
             original_from: String::new(),
+            from_header: String::new(),
             envelope_from: String::new(),
             reply_to: None,
             recipients: Vec::new(),

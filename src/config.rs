@@ -496,8 +496,11 @@ pub struct RelayConfig {
     #[serde(default = "default_true")]
     pub from_same_as_username: bool,
     /// When true, SMTP `MAIL FROM` is rewritten to the relay From address
-    /// (SPF alignment). When false, the original envelope sender is kept.
-    #[serde(default)]
+    /// (SPF alignment). Sending-as-username already rewrites MAIL FROM even
+    /// when this is false, because authenticated hosts reject a foreign
+    /// envelope sender. Uncheck only for a custom From that must keep the
+    /// original bounce path.
+    #[serde(default = "default_true")]
     pub align_envelope: bool,
     /// Relative share of traffic for the `weighted` strategy.
     pub weight: u32,
@@ -535,7 +538,7 @@ impl Default for RelayConfig {
             tls: TlsMode::Tls,
             from_address: String::new(),
             from_same_as_username: true,
-            align_envelope: false,
+            align_envelope: true,
             weight: 1,
             priority: 100,
             enabled: true,

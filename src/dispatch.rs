@@ -306,6 +306,12 @@ pub async fn attempt_delivery(
             );
         }
 
+        state.metrics.activity.update(&message.id, |record| {
+            record.from_header = rewritten.from_header.clone();
+            record.envelope_from = rewritten.envelope_from.clone();
+            record.notes = rewritten.notes.clone();
+        });
+
         tracing::debug!(
             id = %message.id,
             relay = relay.id(),

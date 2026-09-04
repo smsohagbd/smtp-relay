@@ -1,234 +1,105 @@
 # smtp-relay
 
-A high-performance, asynchronous SMTP **proxy and load-balancing relay** written in
-Rust. It listens on port 1025 (configurable), accepts mail from an application such
-as Mautic, rewrites only the `From` *address*, and multiplexes the message across a
-pool of upstream SMTP relays using round-robin, weighted, least-used or failover
-selection.
-
-Nothing is ever written to a mailbox. The daemon is a routing multiplexer: parse,
-rewrite, choose an upstream, deliver, record.
+An SMTP **proxy and load balancer**. Your app (Mautic, WordPress, Laravel, a
+script) sends mail to this server. smtp-relay rewrites only the `From` *address*,
+picks an upstream SMTP provider from a pool, and delivers. It does not store
+mailboxes.
 
 ```
-                 ┌──────────────────────────────────────────────┐
-                 │                 smtp-relay                   │
- Mautic          │                                              │      smtp.domain1.com
- ───── 1025 ────►│  ESMTP listener → rewrite → selector → queue │────► smtp.domain2.com
-                 │        │              │           │          │      smtp.domain3.com
-                 │        └──────── metrics / events ┘          │
-                 └───────────────────┬──────────────────────────┘
-                                     │ :8025
-                             dashboard + REST API + /metrics
+  Your app                 smtp-relay                      Upstream SMTPs
+  (Mautic, …)              :1025 inbound                   smtp.provider1.com
+       │                   :8025 dashboard                      │
+       └──── AUTH ────────►  rewrite → pick relay → send  ──────┘
 ```
 
-## Quick start
+- Only the From **email** is changed. Display name, body, To/Cc/Bcc, DKIM/ARC stay.
+- `MAIL FROM` stays original unless you enable SPF alignment on that provider.
+- Dashboard is mobile-friendly. Providers can be added, cloned, bulk-imported, tested.
+
+---
+
+## Install (Linux)
+
+You need a VPS or machine you can SSH into. Then:
 
 ```bash
-git clone https://github.com/<you>/smtp-relay.git
+sudo apt-get update && sudo apt-get install -y git curl
+git clone https://github.com/smsohagbd/smtp-relay.git
 cd smtp-relay
 chmod +x setup.sh
-./setup.sh                 # prompts; Enter keeps defaults
-cargo build --release
-./target/release/smtp-relay
+./setup.sh
 ```
 
-On Windows use `powershell -File setup.ps1` instead of `./setup.sh`.
+`setup.sh` does everything else:
 
-Press Enter through every prompt and you get **admin / admin**, inbound SMTP
-**1025**, dashboard **8025**. Then open `http://127.0.0.1:8025/`, sign in, and
-add SMTP providers. New providers default to port **465 / SSL**, From = username,
-and MAIL FROM alignment off.
+1. Installs the compiler, OpenSSL headers, and **Rust** if they are missing  
+2. Asks for admin name, password, SMTP port, web port (Enter = defaults)  
+3. Writes `config.yaml` (and `/etc/smtp-relay/config.yaml`)  
+4. Builds a release binary  
+5. Enables and starts `smtp-relay.service`
 
-## What it does to a message
+**Defaults if you press Enter on every prompt**
 
-| Step | Behaviour |
+| Item | Default |
 | --- | --- |
-| Parse | Headers are split from the body byte-exactly. MIME boundaries, base64 and quoted-printable payloads, and tracking pixels/links are never re-encoded. |
-| Preserve | `Subject`, `To`, `Cc`, `Bcc`, the body, DKIM/ARC signatures and the original display name are kept as-is. |
-| `From` | Only the address is replaced with the selected relay's identity. The display name is never overridden (`"Jane from Acme" <noreply@relaydomain.com>`). |
-| Envelope | `MAIL FROM` stays the original sender unless that provider has **Align envelope** (SPF) enabled. |
-| Signatures | Incoming `DKIM-Signature` / `ARC-*` headers are kept. Optional rewrite flags can still strip them. |
-| Trace | `Received` and diagnostic `X-Relay-*` headers are off by default. |
+| Dashboard + SMTP username | `admin` |
+| Password | `admin` |
+| Inbound SMTP port | `1025` |
+| Dashboard port | `8025` |
 
-## Features
+If `config.yaml` already exists it asks before overwriting. Answer `N` to keep your relays and still rebuild the service.
 
-**Routing**
-- `round_robin`, `weighted` (smooth weighted round-robin, no clustering), `least_used`, `failover` (strict priority).
-- Sticky routing by sender or recipient domain, so a campaign keeps one identity.
-- Per-domain overrides (`gmail.com → relay_node_1`, `*.gov.uk → …`).
-- Automatic fallback to the next eligible relay when one rejects the message.
+**Windows:** `powershell -File setup.ps1` writes a config only. Build with Rust from [rustup.rs](https://rustup.rs/).
 
-**Reliability**
-- Retry queue with exponential backoff, capped attempts and optional disk spool that survives a restart.
-- Per-relay circuit breaker that only counts relay-side faults, so one bad recipient never takes a relay out of rotation.
-- Periodic connect + `EHLO` + `NOOP` health probes with automatic recovery.
-- Per-relay per-minute / hourly / daily quotas (off until you enable them) and concurrency caps.
-- Graceful shutdown: the listener stops, in-flight deliveries finish, the spool is left intact.
+---
 
-**Control**
-- Activate / deactivate a single relay, all relays, a selected subset, or "only these" (activate the selection and deactivate the rest) — from the dashboard or the API.
-- Live routing-strategy switching, config edit-and-save, `SIGHUP`/API reload, per-relay probe and test-send.
-- Toggles survive restarts because they are mirrored back into the config file.
+## After setup
 
-**Observability**
-- Bundled zero-dependency dashboard: throughput chart, per-relay stats, recent messages, queue inspector, config editor, live updates over SSE.
-- Prometheus exposition at `/metrics`, `/healthz` and `/readyz` for orchestrators.
-- Structured logging (`text`, `compact` or `json`) with optional daily rolling files.
-
-## Build
-
-Requires a stable Rust toolchain (1.75+).
-
-```bash
-cargo build --release
-# → target/release/smtp-relay
-```
-
-The outbound TLS backend is selectable:
-
-```bash
-cargo build --release                                          # native-tls (default)
-cargo build --release --no-default-features --features tls-rustls   # pure Rust
-```
-
-`tls-rustls` avoids the OpenSSL/SChannel dependency and is usually the better
-choice for slim Linux containers.
-
-## Run
-
-```bash
-./setup.sh                          # or: smtp-relay --generate-config
-$EDITOR config.yaml                 # optional; providers can be added in the UI
-smtp-relay --check                  # validate without starting
-smtp-relay --probe                  # connect to every relay and report
-smtp-relay                          # start the daemon
-```
+Open the dashboard (use your server IP and the web port you chose):
 
 ```
-OPTIONS
-  -c, --config <PATH>        config file (.yaml, .yml, .toml, .json)
-      --check                validate the configuration and exit
-      --print-config         print the effective config, secrets redacted
-      --generate-config [P]  write a starter config (default ./config.yaml)
-      --force                let --generate-config overwrite an existing file
-      --probe                probe every relay and exit (non-zero if any fail)
-  -V, --version / -h, --help
+http://YOUR-SERVER-IP:8025/
 ```
 
-The config path is taken from `--config`, then `$SMTP_RELAY_CONFIG`, then
-`./config.yaml`, `./config.yml`, `./config.toml`, `./config.json`,
-`/etc/smtp-relay/config.yaml`. `RUST_LOG` overrides `logging.level`.
+Sign in with the username/password from setup. Then **Add SMTP provider** (or **Bulk add** / **Clone**).
 
-## Configuration
+New providers default to **port 465 / SSL**. If the username is an email, From is filled from it. The connection is tested before save.
 
-`config.example.yaml` documents every option; the minimum viable file is just a
-relay list. The schema from the brief works unchanged:
+Point Mautic (or any mailer) at the **relay**, not at Gmail/SES directly:
+
+| Setting | Value |
+| --- | --- |
+| Host | your server IP |
+| Port | `1025` (or whatever you set) |
+| Encryption | none |
+| Authentication | yes |
+| Username / password | same as dashboard (`admin` / `admin` unless you changed them) |
+
+Leave the app’s display name and From as the real sender. The relay rewrites only the address to the selected upstream identity.
+
+Change the SMTP or dashboard password later in `/etc/smtp-relay/config.yaml`:
 
 ```yaml
 server:
-  bind_address: "0.0.0.0:1025"
-  hostname: "smtp-proxy.local"
-  max_message_size_mb: 25
-  timeout_seconds: 30
+  require_auth: true
+  auth_users:
+    - username: "admin"
+      password: "new-smtp-password"
 
-routing:
-  strategy: "weighted"        # round_robin | weighted | least_used | failover
-
-relays:
-  - id: "relay_node_1"
-    host: "smtp.domain1.com"
-    port: 465
-    tls: "tls"                # none | starttls | tls | opportunistic
-    auth:
-      username: "mailer@domain1.com"
-      password: "secret_password_1"
-    from_same_as_username: true   # From = username; uncheck to set from_address
-    align_envelope: false         # true = rewrite MAIL FROM (SPF alignment)
-    weight: 40                    # 40% of traffic
-
-  - id: "relay_node_2"
-    host: "smtp.domain2.com"
-    port: 465
-    tls: "tls"
-    auth:
-      username: "mailer@domain2.com"
-      password: "secret_password_2"
-    from_same_as_username: false
-    from_address: "newsletter@domain2.com"
-    weight: 60
+admin:
+  username: "admin"
+  password: "new-dashboard-password"
 ```
 
-Sections you will probably touch next:
+Then `sudo systemctl restart smtp-relay`.
 
-- `server.submission_mode` — `queue` (accept and spool, highest throughput),
-  `direct` (pass the upstream verdict back so Mautic owns the retry), or
-  `hybrid` (try inline, fall back to the queue).
-- `server.allowed_networks` / `server.require_auth` / `server.auth_users` — do
-  not expose the listener without one of these.
-- `queue.*` — worker count, capacity, attempt cap and backoff curve.
-- `health.*` — probe interval and circuit-breaker thresholds.
-- `admin.api_token` — required for any non-loopback API access.
+`config.yaml` is not in git (it holds secrets). The copy the service uses is:
 
-### Mautic
+`/etc/smtp-relay/config.yaml`
 
-In *Configuration → Email Settings*: mailer transport **Other SMTP Server**,
-host = the relay host, port = `1025`, encryption = none, authentication = none
-(or the credentials from `server.auth_users` if `require_auth` is on). Leave
-Mautic's own from-address and display name as the real sender — the relay
-rewrites only the From *address*.
+---
 
-## Dashboard and API
-
-The dashboard is served at `http://127.0.0.1:8025/` and needs no build step or
-CDN. `setup.sh` writes `admin.username` / `admin.password` (defaults **admin** /
-**admin**). After login the browser keeps an HttpOnly session cookie for 12 hours.
-Scripts can still use `Authorization: Bearer <admin.api_token>` (or `?token=`
-for `EventSource`). With no password and no token, only loopback clients are
-accepted.
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/healthz`, `/readyz`, `/metrics` | Liveness, readiness, Prometheus. No token. |
-| `GET` | `/api/status` | Everything the overview needs: counters, derived rates, per-minute series. |
-| `GET` | `/api/series?minutes=60` | Throughput buckets only. |
-| `GET` | `/api/events` | SSE stream of message/relay/queue/config events. |
-| `GET`/`POST` | `/api/relays` | List, or add a relay. |
-| `GET`/`PUT`/`DELETE` | `/api/relays/{id}` | Inspect, replace, remove. |
-| `POST` | `/api/relays/{id}/activate` `…/deactivate` `…/toggle` | Single-relay activation. |
-| `POST` | `/api/relays/activate-all`, `/api/relays/deactivate-all` | Bulk activation. |
-| `POST` | `/api/relays/bulk` | `{"action":"activate\|deactivate\|exclusive","ids":[…]}`. |
-| `POST` | `/api/relays/{id}/probe` | Connect + `EHLO` + `NOOP` now. |
-| `POST` | `/api/relays/{id}/test` | `{"to":"you@example.com"}` — send a real test message. |
-| `POST` | `/api/relays/{id}/reset-stats` `…/reset-circuit` | Clear counters, close the breaker. |
-| `GET`/`PUT` | `/api/routing` | Read or change strategy, sticky mode, fallback, attempt cap. |
-| `GET`/`PUT` | `/api/config` | Read (secrets redacted) or replace the whole document. |
-| `POST` | `/api/config/reload`, `/api/config/save` | Re-read the file, or write the running config. |
-| `GET`/`DELETE` | `/api/messages` | Recent activity (`?limit=`, `?status=`, `?relay=`), or clear it. |
-| `GET` | `/api/messages/{id}` | One record. |
-| `GET`/`DELETE` | `/api/queue`, `/api/queue/{id}` | Inspect, purge, or drop one message. |
-| `POST` | `/api/queue/flush` | Make every queued message due immediately. |
-
-Mutating endpoints persist to the config file by default; add `?persist=false`
-to change only the running process. Set `admin.allow_config_write: false` to
-forbid writes entirely.
-
-```bash
-curl -s localhost:8025/api/status | jq .relays
-curl -X POST localhost:8025/api/relays/relay_node_2/deactivate
-curl -X POST localhost:8025/api/relays/bulk \
-     -H 'content-type: application/json' \
-     -d '{"action":"exclusive","ids":["relay_node_1"]}'
-curl -X POST localhost:8025/api/relays/relay_node_1/test \
-     -H 'content-type: application/json' -d '{"to":"you@example.com"}'
-```
-
-## Deployment
-
-### systemd
-
-`./setup.sh` builds the binary, writes `config.yaml`, installs
-`/usr/local/bin/smtp-relay`, enables `smtp-relay.service`, and starts it.
-You do not need to write a unit file by hand.
+## Daily commands
 
 ```bash
 sudo systemctl status smtp-relay
@@ -236,7 +107,93 @@ sudo systemctl restart smtp-relay
 sudo journalctl -u smtp-relay -f
 ```
 
-### Docker
+After `git pull` on the server, run `./setup.sh` again (keep the existing config) so the binary and service update.
+
+---
+
+## What it does to a message
+
+| Step | Behaviour |
+| --- | --- |
+| Parse | Headers split from the body byte-exactly. HTML, pixels, links, MIME are never re-encoded. |
+| Keep | Subject, To, Cc, Bcc, body, display name, incoming DKIM/ARC. |
+| From | Only the address becomes the selected relay identity. |
+| Envelope | Original `MAIL FROM` unless **Align envelope (SPF)** is on for that provider. |
+| Quotas | Per minute / hour / day, off until you enable them on the provider. |
+
+---
+
+## Features
+
+- Strategies: `round_robin`, `weighted`, `least_used`, `failover`
+- Sticky routing, per-domain overrides, fallback on failure
+- Retry queue + disk spool, circuit breaker, health probes
+- Activate / deactivate / clone / bulk-import providers
+- Test-before-save, probe, send-test
+- Dashboard + REST API + Prometheus `/metrics`
+
+Every option is documented in [`config.example.yaml`](config.example.yaml).
+
+---
+
+## Configuration (optional)
+
+Minimum relay list (you can also add these only from the UI):
+
+```yaml
+relays:
+  - id: "relay_node_1"
+    host: "smtp.domain1.com"
+    port: 465
+    tls: "tls"                 # none | starttls | tls | opportunistic
+    auth:
+      username: "mailer@domain1.com"
+      password: "secret"
+    from_same_as_username: true
+    align_envelope: true
+    weight: 40
+```
+
+**Bulk add** in the dashboard, one line per provider:
+
+```
+host:port:user:pass:ssl
+host:port:user:pass:ssl:from@domain.com
+```
+
+Use `|` instead of `:` if the password contains colons. TLS token: `ssl`, `tls`, `starttls`, `none`.
+
+Config search order: `--config`, `$SMTP_RELAY_CONFIG`, `./config.yaml`, `/etc/smtp-relay/config.yaml`.
+
+```
+smtp-relay --check
+smtp-relay --print-config
+smtp-relay --probe
+smtp-relay -c /path/to/config.yaml
+```
+
+---
+
+## API (short)
+
+Dashboard login sets a cookie. Scripts can use `Authorization: Bearer <admin.api_token>`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/healthz` `/readyz` `/metrics` | Health and Prometheus |
+| `GET` | `/api/status` | Overview |
+| `GET`/`POST` | `/api/relays` | List or add (add probes first) |
+| `POST` | `/api/relays/import` | Bulk add from text |
+| `PUT`/`DELETE` | `/api/relays/{id}` | Update or delete |
+| `POST` | `/api/relays/{id}/probe` `/test` | Health probe / send test mail |
+
+---
+
+## Docker
+
+```bash
+cargo build --release --no-default-features --features tls-rustls
+```
 
 ```dockerfile
 FROM rust:1-slim AS build
@@ -255,46 +212,7 @@ ENV SMTP_RELAY_CONFIG=/etc/smtp-relay/config.yaml
 ENTRYPOINT ["smtp-relay"]
 ```
 
-```yaml
-# docker-compose.yml
-services:
-  smtp-relay:
-    build: .
-    ports: ["1025:1025", "8025:8025"]
-    volumes:
-      - ./config.yaml:/etc/smtp-relay/config.yaml:ro
-      - relay-spool:/var/lib/smtp-relay/spool
-    environment:
-      RUST_LOG: info
-    healthcheck:
-      test: ["CMD", "smtp-relay", "--check"]
-      interval: 30s
-    restart: unless-stopped
-
-volumes:
-  relay-spool:
-```
-
-With `tls-rustls` the image needs no OpenSSL. Bind `admin.bind_address` to
-`0.0.0.0:8025` **only** together with `admin.api_token`.
-
-## Operating notes
-
-- **Deactivate vs. circuit breaker.** Operator activation and health are
-  independent: a relay you switched off stays off even after it recovers, and a
-  relay the breaker tripped comes back on its own once probes succeed.
-- **Nothing eligible.** If every relay is off, over quota or tripped, mail is
-  deferred with a `4xx` (or spooled, in `queue` mode) — never silently dropped.
-  `/readyz` returns `503` in that state.
-- **Restart-safe state.** Activation toggles and config edits are written back
-  to the config file; queued messages stay on the spool when `queue.persist` is
-  on.
-- **Config edits.** `GET /api/config` redacts passwords as `__redacted__`;
-  echoing that value back on `PUT` keeps the stored secret, so the dashboard can
-  edit a config it is not allowed to read.
-- **Queue sizing changes** (`workers`, `capacity`, `persist`, `directory`) are
-  read at startup; the API reports `restart_required_for_queue_changes` when a
-  reload touches them.
+---
 
 ## Tests
 
@@ -302,30 +220,8 @@ With `tls-rustls` the image needs no OpenSSL. Bind `admin.bind_address` to
 cargo test
 ```
 
-Covers header rewriting byte-for-byte, `DATA` dot-unstuffing and size limits,
-command parsing, selection fairness for every strategy, breaker and quota
-transitions, queue backoff and recovery, CIDR matching, and API authorisation.
-
-### End-to-end smoke test
-
-`smoke/` holds a self-contained harness: a fake upstream SMTP sink, a matching
-config, a Mautic-shaped submitter and an SSE watcher. It needs Python 3 and
-nothing else.
-
-```bash
-python smoke/fake_upstream.py 3025 smoke/received.eml &   # accepts and dumps mail
-smtp-relay --config smoke/config.smoke.yaml &
-python smoke/send.py 2525                                 # submit one message
-python smoke/watch_events.py 8025 5                        # tail the live event stream
-```
-
-`smoke/received.eml` then shows exactly what the upstream saw: `From` address
-rewritten to the relay identity with the display name intact, original DKIM/ARC
-headers still present, and the multipart body, quoted-printable text and
-tracking links unchanged.
+`smoke/` is a Python harness (fake upstream + submitter). See that folder.
 
 ## Licence
 
 MIT.
-#   s m t p - r e l a y  
- 
