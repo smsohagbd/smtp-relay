@@ -36,19 +36,23 @@ pub struct AppState {
     shutdown: watch::Sender<bool>,
     shutting_down: AtomicBool,
     sessions: SessionStore,
+    lockout: AuthGuard,
 }
 
 impl AppState {
     pub fn new(config: Config, config_path: PathBuf) -> Result<Arc<Self>, String> {
         let pool = Pool::build(&config)?;
         let queue = Arc::new(Queue::new(&config.queue));
+        let metrics = Arc::new(Metrics::with_activity_directory(
+            config.logging.directory.clone(),
+        ));
         let (shutdown, _) = watch::channel(false);
 
         Ok(Arc::new(Self {
             config: RwLock::new(Arc::new(config)),
             pool: RwLock::new(Arc::new(pool)),
             config_path,
-            metrics: Arc::new(Metrics::new()),
+            metrics,
             events: Arc::new(EventBus::new()),
             queue,
             started_at: Instant::now(),
@@ -56,11 +60,16 @@ impl AppState {
             shutdown,
             shutting_down: AtomicBool::new(false),
             sessions: SessionStore::new(),
+            lockout: AuthGuard::new(),
         }))
     }
 
     pub fn sessions(&self) -> &SessionStore {
         &self.sessions
+    }
+
+    pub fn lockout(&self) -> &AuthGuard {
+        &self.lockout
     }
 
     /// Current configuration generation.
@@ -269,6 +278,75 @@ impl SessionStore {
 
     pub fn revoke(&self, token: &str) {
         self.lock().remove(token);
+    }
+}
+
+/// Dashboard login brute-force brake: 5 failures from one IP, then a timed block.
+pub struct AuthGuard {
+    inner: Mutex<HashMap<std::net::IpAddr, LoginAttempts>>,
+}
+
+struct LoginAttempts {
+    failures: u32,
+    blocked_until: Option<Instant>,
+}
+
+impl AuthGuard {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<std::net::IpAddr, LoginAttempts>> {
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// `Err(remaining)` when this IP is currently blocked.
+    pub fn check(&self, ip: std::net::IpAddr) -> Result<(), Duration> {
+        let mut guard = self.lock();
+        let Some(entry) = guard.get_mut(&ip) else {
+            return Ok(());
+        };
+        if let Some(until) = entry.blocked_until {
+            if until > Instant::now() {
+                return Err(until.saturating_duration_since(Instant::now()));
+            }
+            entry.blocked_until = None;
+            entry.failures = 0;
+        }
+        Ok(())
+    }
+
+    /// Records a failed login. Returns `Some(block)` when the IP just crossed
+    /// the limit or is already blocked.
+    pub fn fail(&self, ip: std::net::IpAddr, max_failures: u32, block: Duration) -> Option<Duration> {
+        if max_failures == 0 {
+            return None;
+        }
+        let mut guard = self.lock();
+        let entry = guard.entry(ip).or_insert(LoginAttempts {
+            failures: 0,
+            blocked_until: None,
+        });
+        if let Some(until) = entry.blocked_until {
+            if until > Instant::now() {
+                return Some(until.saturating_duration_since(Instant::now()));
+            }
+            entry.blocked_until = None;
+            entry.failures = 0;
+        }
+        entry.failures = entry.failures.saturating_add(1);
+        if entry.failures >= max_failures {
+            entry.blocked_until = Some(Instant::now() + block);
+            Some(block)
+        } else {
+            None
+        }
+    }
+
+    pub fn success(&self, ip: std::net::IpAddr) {
+        self.lock().remove(&ip);
     }
 }
 

@@ -406,6 +406,10 @@ pub struct AdminConfig {
     pub allow_config_write: bool,
     /// CIDRs permitted to reach the admin API. Empty means "no CIDR filter".
     pub allowed_networks: Vec<String>,
+    /// Failed dashboard logins allowed from one IP before it is blocked.
+    pub login_max_failures: u32,
+    /// How long a blocked IP stays locked out.
+    pub login_block_seconds: u64,
 }
 
 impl AdminConfig {
@@ -432,6 +436,8 @@ impl Default for AdminConfig {
             dashboard_enabled: true,
             allow_config_write: true,
             allowed_networks: Vec::new(),
+            login_max_failures: 5,
+            login_block_seconds: 15 * 60,
         }
     }
 }

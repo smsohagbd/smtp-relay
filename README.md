@@ -93,6 +93,45 @@ admin:
 
 Then `sudo systemctl restart smtp-relay`.
 
+---
+
+## Where logs live
+
+| What | Where | How long |
+| --- | --- | --- |
+| Mail log (Postfix/Exim style) | `/var/log/smtp-relay/maillog` | Daily rotate to `maillog-YYYY-MM-DD`; append-only |
+| Dashboard list index | `/var/log/smtp-relay/activity.jsonl` | Same rotate; Delete buttons rewrite this file only |
+| Retry queue (mail waiting to send) | `/var/lib/smtp-relay/spool` | Until delivered, failed, or purged |
+| Process log | `smtp-relay.YYYY-MM-DD` in the same dir + `journalctl -u smtp-relay` | Daily files + systemd journal |
+
+Nothing in that table lives in RAM as a growing ring. `tail -f /var/log/smtp-relay/maillog` is the live mail log:
+
+```
+Sep  5 02:17:05 smtp-relay: qid: from=<info@…>, to=<lead@gmail.com>, relay=node1, status=deferred, err="501 …"
+```
+
+Dashboard is **50 per page**. **Delete deferred**, **Delete failed**, and **Delete all** remove matching rows from both the dashboard and the `maillog` files. The retry queue is not touched. You can also delete files yourself:
+
+```bash
+sudo truncate -s 0 /var/log/smtp-relay/maillog
+sudo rm -f /var/log/smtp-relay/maillog-* /var/log/smtp-relay/activity.jsonl /var/log/smtp-relay/activity-*.jsonl
+```
+
+`setup.sh` sets:
+
+```yaml
+logging:
+  directory: "/var/log/smtp-relay"
+  file_prefix: "smtp-relay"
+```
+
+Dashboard login: **5 wrong passwords** from one IP locks that IP for **15 minutes** (`admin.login_max_failures` / `login_block_seconds`).
+
+```bash
+sudo tail -f /var/log/smtp-relay/maillog
+sudo journalctl -u smtp-relay -f
+```
+
 `config.yaml` is not in git (it holds secrets). The copy the service uses is:
 
 `/etc/smtp-relay/config.yaml`
@@ -118,7 +157,7 @@ After `git pull` on the server, run `./setup.sh` again (keep the existing config
 | Parse | Headers split from the body byte-exactly. HTML, pixels, links, MIME are never re-encoded. |
 | Keep | Subject, To, Cc, Bcc, body, display name, incoming DKIM/ARC. |
 | From | Only the address becomes the selected relay identity. |
-| Envelope | Original `MAIL FROM` unless **Align envelope (SPF)** is on for that provider. |
+| Envelope | Rewritten to the relay From when sending as the SMTP username, or when **Align envelope** is on. |
 | Quotas | Per minute / hour / day, off until you enable them on the provider. |
 
 ---
@@ -186,6 +225,8 @@ Dashboard login sets a cookie. Scripts can use `Authorization: Bearer <admin.api
 | `POST` | `/api/relays/import` | Bulk add from text |
 | `PUT`/`DELETE` | `/api/relays/{id}` | Update or delete |
 | `POST` | `/api/relays/{id}/probe` `/test` | Health probe / send test mail |
+| `GET` | `/api/messages?limit=50&page=1&status=` | Activity log (50 per page) |
+| `DELETE` | `/api/messages` or `?status=deferred` / `failed` | Clear all, or one status |
 
 ---
 

@@ -1,11 +1,14 @@
 //! Process-wide counters, rolling time series, per-message activity log and
 //! Prometheus exposition.
 //!
-//! All state is lock-free counters plus two small mutex-guarded ring buffers.
-//! The critical sections never span an `.await`, so a `std::sync::Mutex` is the
-//! right primitive here.
+//! Counters stay in RAM. The message activity log is a Postfix/Exim-style
+//! file under `logging.directory` so a long campaign cannot grow process
+//! memory. Tests without a directory keep a small in-memory buffer.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -14,8 +17,10 @@ use serde::{Deserialize, Serialize};
 
 /// Minutes of history retained for the dashboard charts.
 const SERIES_MINUTES: usize = 120;
-/// Messages retained in the activity log.
+/// In-memory fallback (tests / no `logging.directory` only).
 const ACTIVITY_CAPACITY: usize = 1_000;
+/// Recent rows kept so `update()` does not re-read the file every time.
+const LIVE_CACHE: usize = 256;
 
 /// Upper bounds (milliseconds) for the delivery latency histogram.
 const LATENCY_BUCKETS_MS: [u64; 9] = [50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000];
@@ -298,6 +303,20 @@ pub enum MessageStatus {
     Rejected,
 }
 
+impl MessageStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Queued => "queued",
+            Self::Sending => "sending",
+            Self::Delivered => "delivered",
+            Self::Deferred => "deferred",
+            Self::Failed => "failed",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
 /// One row in the dashboard's message list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageRecord {
@@ -352,12 +371,45 @@ impl MessageRecord {
 
 #[derive(Debug, Default)]
 pub struct ActivityLog {
+    directory: Option<PathBuf>,
     entries: Mutex<VecDeque<MessageRecord>>,
+    live: Mutex<HashMap<String, MessageRecord>>,
 }
 
 impl ActivityLog {
-    /// Inserts a new record, evicting the oldest when at capacity.
+    pub fn open(directory: Option<PathBuf>) -> Self {
+        let Some(directory) = directory else {
+            return Self::default();
+        };
+        if let Err(error) = fs::create_dir_all(&directory) {
+            eprintln!(
+                "warning: could not create maillog directory {}: {error}; activity stays in memory",
+                directory.display()
+            );
+            return Self::default();
+        }
+        tracing::info!(
+            maillog = %directory.join("maillog").display(),
+            "message log is a file (Postfix/Exim style), not a RAM ring"
+        );
+        Self {
+            directory: Some(directory),
+            entries: Mutex::new(VecDeque::new()),
+            live: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn maillog_path(&self) -> Option<PathBuf> {
+        self.directory.as_ref().map(|directory| directory.join("maillog"))
+    }
+
+    /// Inserts a new record and appends it to today's maillog.
     pub fn push(&self, record: MessageRecord) {
+        if self.directory.is_some() {
+            self.remember(&record);
+            self.append_files(&record);
+            return;
+        }
         let mut entries = self.lock();
         if entries.len() >= ACTIVITY_CAPACITY {
             entries.pop_front();
@@ -367,6 +419,17 @@ impl ActivityLog {
 
     /// Applies `update` to the record with `id`, if it is still retained.
     pub fn update<F: FnOnce(&mut MessageRecord)>(&self, id: &str, update: F) {
+        if self.directory.is_some() {
+            let mut record = self
+                .cached(id)
+                .or_else(|| self.load_id(id))
+                .unwrap_or_else(|| MessageRecord::new(id.to_string()));
+            update(&mut record);
+            record.updated_at = Utc::now();
+            self.remember(&record);
+            self.append_files(&record);
+            return;
+        }
         let mut entries = self.lock();
         if let Some(record) = entries.iter_mut().rev().find(|r| r.id == id) {
             update(record);
@@ -375,6 +438,9 @@ impl ActivityLog {
     }
 
     pub fn get(&self, id: &str) -> Option<MessageRecord> {
+        if self.directory.is_some() {
+            return self.cached(id).or_else(|| self.load_id(id));
+        }
         let entries = self.lock();
         entries.iter().rev().find(|r| r.id == id).cloned()
     }
@@ -386,26 +452,61 @@ impl ActivityLog {
         status: Option<MessageStatus>,
         relay_id: Option<&str>,
     ) -> Vec<MessageRecord> {
-        let entries = self.lock();
-        entries
-            .iter()
-            .rev()
-            .filter(|record| status.map(|want| record.status == want).unwrap_or(true))
-            .filter(|record| {
-                relay_id
+        self.page(limit, 1, status, relay_id).0
+    }
+
+    /// One page of records (newest first) plus the filtered total.
+    pub fn page(
+        &self,
+        limit: usize,
+        page: usize,
+        status: Option<MessageStatus>,
+        relay_id: Option<&str>,
+    ) -> (Vec<MessageRecord>, usize) {
+        let mut records = if self.directory.is_some() {
+            self.load_all()
+        } else {
+            self.lock().iter().cloned().collect()
+        };
+        records.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        records.retain(|record| {
+            status.map(|want| record.status == want).unwrap_or(true)
+                && relay_id
                     .map(|want| record.relay_id.as_deref() == Some(want))
                     .unwrap_or(true)
-            })
-            .take(limit)
-            .cloned()
-            .collect()
+        });
+        let total = records.len();
+        let page = page.max(1);
+        let skip = page.saturating_sub(1).saturating_mul(limit);
+        let records = records.into_iter().skip(skip).take(limit).collect();
+        (records, total)
     }
 
     pub fn clear(&self) -> usize {
+        if self.directory.is_some() {
+            return self.rewrite_jsonl(|_| false);
+        }
         let mut entries = self.lock();
         let count = entries.len();
         entries.clear();
         count
+    }
+
+    /// Drops records matching `status`. `None` clears everything, including
+    /// the human `maillog` and rotated `maillog-*` files.
+    pub fn clear_status(&self, status: Option<MessageStatus>) -> usize {
+        match status {
+            None => self.clear(),
+            Some(want) => {
+                if self.directory.is_some() {
+                    return self.rewrite_jsonl(|record| record.status != want);
+                }
+                let mut entries = self.lock();
+                let before = entries.len();
+                entries.retain(|record| record.status != want);
+                before - entries.len()
+            }
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, VecDeque<MessageRecord>> {
@@ -414,6 +515,271 @@ impl ActivityLog {
             Err(poisoned) => poisoned.into_inner(),
         }
     }
+
+    fn live(&self) -> std::sync::MutexGuard<'_, HashMap<String, MessageRecord>> {
+        match self.live.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn remember(&self, record: &MessageRecord) {
+        let mut live = self.live();
+        live.insert(record.id.clone(), record.clone());
+        while live.len() > LIVE_CACHE {
+            if let Some(oldest) = live.keys().next().cloned() {
+                live.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn cached(&self, id: &str) -> Option<MessageRecord> {
+        self.live().get(id).cloned()
+    }
+
+    fn append_files(&self, record: &MessageRecord) {
+        let Some(directory) = &self.directory else {
+            return;
+        };
+        rotate_maillog(directory);
+        if let Err(error) = append_line(&directory.join("maillog"), &format_maillog_line(record)) {
+            tracing::warn!(%error, "could not write maillog");
+        }
+        if let Err(error) = append_line(
+            &directory.join("activity.jsonl"),
+            &serde_json::to_string(record).unwrap_or_default(),
+        ) {
+            tracing::warn!(%error, "could not write activity.jsonl");
+        }
+    }
+
+    fn load_id(&self, id: &str) -> Option<MessageRecord> {
+        let mut found = None;
+        for path in self.jsonl_files() {
+            if let Ok(file) = fs::File::open(&path) {
+                for line in BufReader::new(file).lines().map_while(Result::ok) {
+                    if let Ok(record) = serde_json::from_str::<MessageRecord>(&line) {
+                        if record.id == id {
+                            found = Some(record);
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    fn load_all(&self) -> Vec<MessageRecord> {
+        let mut map = HashMap::new();
+        for path in self.jsonl_files() {
+            if let Ok(file) = fs::File::open(&path) {
+                for line in BufReader::new(file).lines().map_while(Result::ok) {
+                    if let Ok(record) = serde_json::from_str::<MessageRecord>(&line) {
+                        map.insert(record.id.clone(), record);
+                    }
+                }
+            }
+        }
+        for record in self.live().values() {
+            map.insert(record.id.clone(), record.clone());
+        }
+        map.into_values().collect()
+    }
+
+    fn jsonl_files(&self) -> Vec<PathBuf> {
+        let Some(directory) = &self.directory else {
+            return Vec::new();
+        };
+        let mut files: Vec<PathBuf> = fs::read_dir(directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name == "activity.jsonl" || (name.starts_with("activity-") && name.ends_with(".jsonl")))
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    fn rewrite_jsonl(&self, keep: impl Fn(&MessageRecord) -> bool) -> usize {
+        let Some(directory) = &self.directory else {
+            return 0;
+        };
+        let all = self.load_all();
+        let before = all.len();
+        let mut kept = Vec::new();
+        let mut dropped_ids = Vec::new();
+        for record in all {
+            if keep(&record) {
+                kept.push(record);
+            } else {
+                dropped_ids.push(record.id);
+            }
+        }
+        let removed = before - kept.len();
+
+        {
+            let mut live = self.live();
+            live.clear();
+            for record in kept.iter().rev().take(LIVE_CACHE) {
+                live.insert(record.id.clone(), record.clone());
+            }
+        }
+
+        for path in self.jsonl_files() {
+            if path.file_name().and_then(|name| name.to_str()) != Some("activity.jsonl") {
+                let _ = fs::remove_file(path);
+            }
+        }
+
+        let mut out = String::new();
+        for record in &kept {
+            if let Ok(line) = serde_json::to_string(record) {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        if let Err(error) = fs::write(directory.join("activity.jsonl"), out) {
+            tracing::warn!(%error, "could not compact activity.jsonl");
+        }
+        self.rewrite_maillog(&dropped_ids, kept.is_empty());
+        removed
+    }
+
+    fn maillog_files(&self) -> Vec<PathBuf> {
+        let Some(directory) = &self.directory else {
+            return Vec::new();
+        };
+        let mut files: Vec<PathBuf> = fs::read_dir(directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name == "maillog" || name.starts_with("maillog-"))
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    fn rewrite_maillog(&self, dropped_ids: &[String], wipe_all: bool) {
+        if wipe_all {
+            for path in self.maillog_files() {
+                let _ = fs::write(path, "");
+            }
+            return;
+        }
+        if dropped_ids.is_empty() {
+            return;
+        }
+        for path in self.maillog_files() {
+            let Ok(file) = fs::File::open(&path) else {
+                continue;
+            };
+            let mut kept = String::new();
+            for line in BufReader::new(file).lines().map_while(Result::ok) {
+                let drop = dropped_ids.iter().any(|id| {
+                    line.contains(&format!("smtp-relay: {id}:"))
+                });
+                if !drop {
+                    kept.push_str(&line);
+                    kept.push('\n');
+                }
+            }
+            if let Err(error) = fs::write(&path, kept) {
+                tracing::warn!(path = %path.display(), %error, "could not rewrite maillog");
+            }
+        }
+    }
+}
+
+fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+    if line.is_empty() {
+        return Ok(());
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(line.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn rotate_maillog(directory: &Path) {
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let stamp = directory.join(".maillog-date");
+    let previous = fs::read_to_string(&stamp).unwrap_or_default().trim().to_string();
+    if previous == today {
+        return;
+    }
+    if !previous.is_empty() {
+        let _ = rename_if_exists(directory.join("maillog"), directory.join(format!("maillog-{previous}")));
+        let _ = rename_if_exists(
+            directory.join("activity.jsonl"),
+            directory.join(format!("activity-{previous}.jsonl")),
+        );
+    }
+    let _ = fs::write(stamp, format!("{today}\n"));
+}
+
+fn rename_if_exists(from: PathBuf, to: PathBuf) -> std::io::Result<()> {
+    if from.exists() {
+        fs::rename(from, to)?;
+    }
+    Ok(())
+}
+
+fn format_maillog_line(record: &MessageRecord) -> String {
+    let from = mailbox_address(&record.from_header)
+        .or_else(|| mailbox_address(&record.original_from))
+        .unwrap_or_else(|| record.envelope_from.clone());
+    let to = record
+        .recipients
+        .iter()
+        .map(|address| format!("<{address}>"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let err = record
+        .error
+        .as_deref()
+        .unwrap_or("-")
+        .replace(['\r', '\n'], " ");
+    format!(
+        "{} smtp-relay: {}: from=<{}>, to={}, relay={}, status={}, size={}, nrcpt={}, delay={}, err=\"{}\"",
+        record.updated_at.format("%b %e %H:%M:%S"),
+        record.id,
+        from,
+        if to.is_empty() { "<->".to_string() } else { to },
+        record.relay_id.as_deref().unwrap_or("-"),
+        record.status.as_str(),
+        record.size_bytes,
+        record.recipients.len(),
+        record.attempts,
+        err,
+    )
+}
+
+fn mailbox_address(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some(start) = value.rfind('<') {
+        if let Some(end) = value[start + 1..].find('>') {
+            let address = value[start + 1..start + 1 + end].trim();
+            if !address.is_empty() {
+                return Some(address.to_string());
+            }
+        }
+    }
+    Some(value.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -431,6 +797,13 @@ pub struct Metrics {
 impl Metrics {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_activity_directory(directory: Option<PathBuf>) -> Self {
+        Self {
+            activity: ActivityLog::open(directory),
+            ..Self::default()
+        }
     }
 
     pub fn inc(&self, counter: &AtomicU64) {
@@ -702,8 +1075,59 @@ mod tests {
 
         assert_eq!(log.recent(10, None, Some("relay_1")).len(), 1);
         assert_eq!(log.recent(10, None, None).len(), 2);
-        // Newest first.
-        assert_eq!(log.recent(1, None, None)[0].id, "b");
+        // Most recently updated first (`a` was touched after `b` was inserted).
+        assert_eq!(log.recent(1, None, None)[0].id, "a");
+
+        let (page, total) = log.page(1, 2, None, None);
+        assert_eq!(total, 2);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id, "b");
+
+        assert_eq!(log.clear_status(Some(MessageStatus::Delivered)), 1);
+        assert_eq!(log.recent(10, None, None).len(), 1);
+        assert_eq!(log.clear_status(None), 1);
+        assert!(log.recent(10, None, None).is_empty());
+    }
+
+    #[test]
+    fn activity_log_writes_maillog_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "smtp-relay-maillog-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let log = ActivityLog::open(Some(directory.clone()));
+
+        let mut first = MessageRecord::new("qid1".to_string());
+        first.original_from = "Jennifer <jennifer@hub.test>".to_string();
+        first.recipients = vec!["lead@gmail.com".to_string()];
+        first.status = MessageStatus::Deferred;
+        first.error = Some("501 denied".to_string());
+        log.push(first);
+        log.update("qid1", |record| record.status = MessageStatus::Failed);
+
+        let text = std::fs::read_to_string(directory.join("maillog")).unwrap();
+        assert!(text.contains("smtp-relay: qid1:"));
+        assert!(text.contains("from=<jennifer@hub.test>"));
+        assert!(text.contains("to=<lead@gmail.com>"));
+        assert!(text.contains("status=failed") || text.contains("status=deferred"));
+
+        let (page, total) = log.page(50, 1, Some(MessageStatus::Failed), None);
+        assert_eq!(total, 1);
+        assert_eq!(page[0].id, "qid1");
+        assert_eq!(log.clear_status(Some(MessageStatus::Failed)), 1);
+        assert_eq!(log.recent(10, None, None).len(), 0);
+        let maillog = std::fs::read_to_string(directory.join("maillog")).unwrap();
+        assert!(
+            !maillog.contains("qid1"),
+            "dashboard delete must remove the maillog lines too"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

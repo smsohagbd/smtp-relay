@@ -133,6 +133,12 @@
   }
   .relay-card-stats b { display: block; color: var(--text); font-size: 16px; }
   .relay-card-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pager {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    flex-wrap: wrap; padding: 10px 14px; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 12px;
+  }
+  .pager-btns { display: flex; align-items: center; gap: 8px; }
 
   @media (max-width: 860px) {
     header, main { padding-left: 12px; padding-right: 12px; }
@@ -287,7 +293,9 @@
           </select>
         </label>
         <div class="spacer"></div>
-        <button class="danger" id="btn-clear-messages">Clear log</button>
+        <button class="danger" id="btn-clear-deferred">Delete deferred</button>
+        <button class="danger" id="btn-clear-failed">Delete failed</button>
+        <button class="danger" id="btn-clear-messages">Delete all</button>
       </div>
       <div id="messages-table"></div>
     </div>
@@ -530,6 +538,8 @@ let STATUS = null;
 let RELAYS = [];
 const selected = new Set();
 let currentTab = "messages";
+const MESSAGE_PAGE_SIZE = 50;
+let messagePage = 1;
 
 // --- overview cards ---------------------------------------------------------
 function renderCards() {
@@ -754,9 +764,25 @@ function updateSelectionUi() {
 }
 
 // --- messages and queue -----------------------------------------------------
-function renderMessages(messages) {
+function renderMessages(payload) {
+  const messages = payload.messages || [];
+  const total = payload.total || 0;
+  const page = payload.page || 1;
+  const pages = payload.pages || 1;
+  const limit = payload.limit || MESSAGE_PAGE_SIZE;
+  messagePage = page;
+  const from = total === 0 ? 0 : (page - 1) * limit + 1;
+  const to = (page - 1) * limit + messages.length;
+  const pager = `<div class="pager">
+    <span>Showing ${from}–${to} of ${total} · 50 per page · file maillog (not RAM)</span>
+    <div class="pager-btns">
+      <button ${page <= 1 ? "disabled" : ""} data-page="${page - 1}">Prev</button>
+      <span>Page ${page} / ${pages}</span>
+      <button ${page >= pages ? "disabled" : ""} data-page="${page + 1}">Next</button>
+    </div>
+  </div>`;
   if (!messages.length) {
-    $("messages-table").innerHTML = '<div class="empty">No messages yet.</div>';
+    $("messages-table").innerHTML = `<div class="empty">No messages yet.</div>${pager}`;
     return;
   }
   const rows = messages.map((message) => `<tr>
@@ -776,7 +802,7 @@ function renderMessages(messages) {
     <thead><tr>
       <th>Time</th><th>Status</th><th>From</th><th>To</th><th>Subject</th>
       <th>Relay</th><th class="num">Try</th><th class="num">Latency</th><th>Error</th><th></th>
-    </tr></thead><tbody>${rows}</tbody></table></div>`;
+    </tr></thead><tbody>${rows}</tbody></table></div>${pager}`;
 }
 
 function renderQueue(queue) {
@@ -825,8 +851,12 @@ async function loadRelays() {
 async function loadTab() {
   if (currentTab === "messages") {
     const status = $("msg-status").value;
-    const payload = await api("/api/messages?limit=100&status=" + encodeURIComponent(status));
-    renderMessages(payload.messages);
+    const payload = await api(
+      "/api/messages?limit=" + MESSAGE_PAGE_SIZE
+        + "&page=" + messagePage
+        + "&status=" + encodeURIComponent(status)
+    );
+    renderMessages(payload);
   } else if (currentTab === "queue") {
     renderQueue(await api("/api/queue?limit=200"));
   } else if (currentTab === "config") {
@@ -874,7 +904,7 @@ function bulk(action, ids, message) {
 // --- wiring -----------------------------------------------------------------
 $("btn-refresh").onclick = refreshAll;
 $("window").onchange = loadStatus;
-$("msg-status").onchange = loadTab;
+$("msg-status").onchange = () => { messagePage = 1; loadTab(); };
 
 $("strategy").onchange = async (event) => {
   await act("/api/routing", {
@@ -957,6 +987,12 @@ $("relay-table").addEventListener("click", async (event) => {
 });
 
 $("messages-table").addEventListener("click", async (event) => {
+  const pager = event.target.closest("button[data-page]");
+  if (pager && !pager.disabled) {
+    messagePage = Number(pager.dataset.page) || 1;
+    loadTab();
+    return;
+  }
   const button = event.target.closest("button[data-msg]");
   if (!button) return;
   try {
@@ -991,7 +1027,21 @@ $("btn-purge").onclick = () => {
   if (!confirm("Purge the whole queue? Messages will be lost.")) return;
   act("/api/queue", { method: "DELETE" }, "Queue purged");
 };
-$("btn-clear-messages").onclick = () => act("/api/messages", { method: "DELETE" }, "Activity log cleared");
+$("btn-clear-deferred").onclick = () => {
+  if (!confirm("Delete all deferred log rows (dashboard + maillog)? The retry queue is not touched.")) return;
+  messagePage = 1;
+  act("/api/messages?status=deferred", { method: "DELETE" }, "Deferred log rows deleted");
+};
+$("btn-clear-failed").onclick = () => {
+  if (!confirm("Delete all failed log rows (dashboard + maillog)?")) return;
+  messagePage = 1;
+  act("/api/messages?status=failed", { method: "DELETE" }, "Failed log rows deleted");
+};
+$("btn-clear-messages").onclick = () => {
+  if (!confirm("Delete the entire mail log (dashboard + /var/log/smtp-relay/maillog)?")) return;
+  messagePage = 1;
+  act("/api/messages", { method: "DELETE" }, "Activity log cleared");
+};
 $("btn-reload-config").onclick = () => act("/api/config/reload", { method: "POST" }, "Configuration reloaded");
 $("btn-save-config").onclick = () => act("/api/config/save", { method: "POST" }, "Configuration written");
 

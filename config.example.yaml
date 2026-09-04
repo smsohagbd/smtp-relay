@@ -217,6 +217,11 @@ admin:
   allowed_networks: []
   # allowed_networks: ["127.0.0.0/8", "10.0.0.0/8"]
 
+  # After this many wrong passwords from one IP, that IP cannot log in
+  # for login_block_seconds (default 5 tries / 15 minutes).
+  login_max_failures: 5
+  login_block_seconds: 900
+
 logging:
   # error | warn | info | debug | trace, or a full RUST_LOG filter such as
   # "info,smtp_relay::smtp=debug". RUST_LOG in the environment wins.
@@ -225,8 +230,9 @@ logging:
   # text | compact | json. Use json when shipping to Loki/ELK/Datadog.
   format: "text"
 
-  # Directory for rolling daily log files. Omit to log to stdout only.
-  # directory: "./logs"
+  # Directory for rolling daily JSON log files. Omit to log to stdout / journal
+  # only. setup.sh uses /var/log/smtp-relay.
+  # directory: "/var/log/smtp-relay"
   file_prefix: "smtp-relay"
 
   # Log the full rewritten header block at debug level. Verbose, but the

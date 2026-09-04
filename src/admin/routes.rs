@@ -132,7 +132,7 @@ async fn route(state: Arc<AppState>, request: Request) -> Reply {
 
         // -- messages -------------------------------------------------------
         ("GET", ["api", "messages"]) => messages(&state, &request).into(),
-        ("DELETE", ["api", "messages"]) => clear_messages(&state).into(),
+        ("DELETE", ["api", "messages"]) => clear_messages(&state, &request).into(),
         ("GET", ["api", "messages", id]) => message(&state, id).into(),
 
         // -- queue ----------------------------------------------------------
@@ -271,16 +271,29 @@ fn login(state: &Arc<AppState>, request: &Request) -> Response {
         Err(error) => return Response::error(400, &error),
     };
 
+    let ip = request.peer.ip();
+    if let Err(remaining) = state.lockout().check(ip) {
+        tracing::warn!(peer = %request.peer, "dashboard login blocked");
+        return Response::error(429, &lockout_message(remaining));
+    }
+
     let user_ok = payload
         .username
         .trim()
         .eq_ignore_ascii_case(config.admin.username.trim());
     let pass_ok = secret_eq(payload.password.trim(), config.admin.password.trim());
     if !user_ok || !pass_ok {
+        let max = config.admin.login_max_failures;
+        let block = std::time::Duration::from_secs(config.admin.login_block_seconds.max(60));
+        if let Some(remaining) = state.lockout().fail(ip, max, block) {
+            tracing::warn!(peer = %request.peer, "dashboard login locked out after {max} failures");
+            return Response::error(429, &lockout_message(remaining));
+        }
         tracing::warn!(peer = %request.peer, "dashboard login failed");
         return Response::error(401, "wrong username or password");
     }
 
+    state.lockout().success(ip);
     let token = state.sessions().create(config.admin.username.clone());
     tracing::info!(user = %config.admin.username, peer = %request.peer, "dashboard login");
     Response::json_value(
@@ -291,6 +304,14 @@ fn login(state: &Arc<AppState>, request: &Request) -> Response {
         }),
     )
     .with_header("Set-Cookie", &session_cookie_header(&token))
+}
+
+fn lockout_message(remaining: std::time::Duration) -> String {
+    let seconds = remaining.as_secs().max(1);
+    let minutes = seconds.div_ceil(60);
+    format!(
+        "too many failed logins from this IP; try again in {minutes} minute(s)"
+    )
 }
 
 fn logout(state: &Arc<AppState>, request: &Request) -> Response {
@@ -1378,7 +1399,8 @@ fn save_config(state: &Arc<AppState>) -> Response {
 // ---------------------------------------------------------------------------
 
 fn messages(state: &Arc<AppState>, request: &Request) -> Response {
-    let limit: usize = request.query_as("limit").unwrap_or(100).clamp(1, 1_000);
+    let limit: usize = request.query_as("limit").unwrap_or(50).clamp(1, 1_000);
+    let page: usize = request.query_as("page").unwrap_or(1).max(1);
     let relay = request.query_param("relay");
     let status = match request.query_param("status") {
         None | Some("") | Some("all") => None,
@@ -1388,12 +1410,21 @@ fn messages(state: &Arc<AppState>, request: &Request) -> Response {
         },
     };
 
-    let records = state.metrics.activity.recent(limit, status, relay);
+    let (records, total) = state.metrics.activity.page(limit, page, status, relay);
+    let pages = if total == 0 {
+        1
+    } else {
+        total.div_ceil(limit)
+    };
     Response::json_value(
         200,
         &json!({
             "count": records.len(),
+            "total": total,
+            "page": page,
+            "pages": pages,
             "limit": limit,
+            "maillog": state.metrics.activity.maillog_path().map(|path| path.display().to_string()),
             "messages": records,
         }),
     )
@@ -1409,9 +1440,17 @@ fn message(state: &Arc<AppState>, id: &str) -> Response {
     }
 }
 
-fn clear_messages(state: &Arc<AppState>) -> Response {
-    let cleared = state.metrics.activity.clear();
-    Response::ok_message(&format!("cleared {cleared} activity record(s)"))
+fn clear_messages(state: &Arc<AppState>, request: &Request) -> Response {
+    let status = match request.query_param("status") {
+        None | Some("") | Some("all") => None,
+        Some(value) => match parse_status(value) {
+            Some(status) => Some(status),
+            None => return Response::error(400, &format!("unknown status `{value}`")),
+        },
+    };
+    let cleared = state.metrics.activity.clear_status(status);
+    let scope = request.query_param("status").unwrap_or("all");
+    Response::ok_message(&format!("cleared {cleared} {scope} activity record(s)"))
 }
 
 fn parse_status(value: &str) -> Option<MessageStatus> {
@@ -1620,6 +1659,30 @@ mod tests {
         assert!(
             authorize(&state, &req).is_ok(),
             "a dashboard password is enough for remote clients after login"
+        );
+    }
+
+    #[test]
+    fn five_failed_logins_block_the_ip() {
+        let state = state_with_admin(AdminConfig {
+            username: "admin".to_string(),
+            password: "letmein".to_string(),
+            login_max_failures: 5,
+            login_block_seconds: 900,
+            ..Default::default()
+        });
+        let mut req = request("203.0.113.9:9000", None);
+        req.method = "POST".to_string();
+        req.body = br#"{"username":"admin","password":"nope"}"#.to_vec();
+        for _ in 0..4 {
+            assert_eq!(login(&state, &req).status, 401);
+        }
+        assert_eq!(login(&state, &req).status, 429);
+        req.body = br#"{"username":"admin","password":"letmein"}"#.to_vec();
+        assert_eq!(
+            login(&state, &req).status,
+            429,
+            "even the right password is refused while the IP is blocked"
         );
     }
 

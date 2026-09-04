@@ -175,6 +175,10 @@ queue:
   persist: true
   directory: "/var/lib/smtp-relay/spool"
 
+logging:
+  directory: "/var/log/smtp-relay"
+  file_prefix: "smtp-relay"
+
 relays: []
 EOF
   echo
@@ -211,7 +215,7 @@ fi
 echo
 echo "==> Installing systemd service…"
 as_root install -m 0755 "$BIN" /usr/local/bin/smtp-relay
-as_root mkdir -p /etc/smtp-relay /var/lib/smtp-relay/spool
+as_root mkdir -p /etc/smtp-relay /var/lib/smtp-relay/spool /var/log/smtp-relay
 as_root cp "$OUT" /etc/smtp-relay/config.yaml
 as_root chmod 640 /etc/smtp-relay/config.yaml
 
