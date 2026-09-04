@@ -1,0 +1,1197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SMTP Relay — Control Panel</title>
+<style>
+  :root {
+    --bg: #0b0f16;
+    --panel: #141a24;
+    --panel-2: #1a212d;
+    --border: #26303f;
+    --text: #e6edf6;
+    --muted: #8a97a8;
+    --accent: #4f9cf9;
+    --ok: #35c98b;
+    --warn: #f0b429;
+    --bad: #f2635f;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  a { color: var(--accent); }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 14px 22px; background: var(--panel); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .spacer { flex: 1; }
+  .live { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(53,201,139,.16); }
+  .dot.off { background: var(--bad); }
+
+  main { padding: 20px 22px 60px; max-width: 1500px; margin: 0 auto; }
+  section { margin-bottom: 26px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .09em; color: var(--muted); margin: 0 0 12px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+  .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+  .card .value { font-size: 25px; font-weight: 640; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .card .foot { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .value.ok { color: var(--ok); } .value.warn { color: var(--warn); } .value.bad { color: var(--bad); }
+
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .panel-head {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 11px 14px; border-bottom: 1px solid var(--border); background: var(--panel-2);
+  }
+  .panel-head strong { font-size: 13px; }
+  .panel-body { padding: 14px; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 9px 11px; text-align: left; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; white-space: nowrap; }
+  tbody tr:hover { background: rgba(79,156,249,.05); }
+  td.num, th.num { text-align: right; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+
+  button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 7px; padding: 6px 11px; font-size: 12.5px; cursor: pointer; font-family: inherit;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #04101f; font-weight: 600; }
+  button.good { border-color: rgba(53,201,139,.5); color: var(--ok); }
+  button.danger { border-color: rgba(242,99,95,.5); color: var(--bad); }
+  button.tiny { padding: 3px 8px; font-size: 11.5px; }
+
+  select, input[type=text], input[type=email], input[type=password], input[type=number], textarea {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 7px; padding: 6px 9px; font-size: 12.5px; font-family: inherit;
+  }
+  textarea { width: 100%; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  label.inline { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .pill.ok { background: rgba(53,201,139,.14); color: var(--ok); }
+  .pill.warn { background: rgba(240,180,41,.14); color: var(--warn); }
+  .pill.bad { background: rgba(242,99,95,.14); color: var(--bad); }
+  .pill.mute { background: rgba(138,151,168,.14); color: var(--muted); }
+
+  .bar { height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; min-width: 54px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs button.active { background: var(--accent); border-color: var(--accent); color: #04101f; font-weight: 600; }
+
+  #toast {
+    position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px;
+    z-index: 100; max-width: 420px;
+  }
+  .toast {
+    background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 8px; padding: 10px 13px; font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  }
+  .toast.ok { border-left-color: var(--ok); }
+  .toast.bad { border-left-color: var(--bad); }
+
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 0; min-width: 340px; max-width: 620px; width: 92%;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog .panel-body { display: grid; gap: 10px; }
+  dialog .row { display: grid; gap: 5px; }
+  dialog .row > span { font-size: 12px; color: var(--muted); }
+  dialog input, dialog textarea { width: 100%; }
+  .actions { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 14px; border-top: 1px solid var(--border); }
+  .empty { padding: 22px; text-align: center; color: var(--muted); font-size: 13px; }
+  .err { color: var(--bad); }
+  .hidden { display: none !important; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 640px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  #login-screen {
+    position: fixed; inset: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+    background:
+      radial-gradient(900px 420px at 15% 0%, rgba(79,156,249,.18), transparent 55%),
+      radial-gradient(700px 380px at 90% 100%, rgba(53,201,139,.12), transparent 50%),
+      var(--bg);
+  }
+  #login-card {
+    width: min(420px, 92vw); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 16px; padding: 32px 28px 26px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.45);
+  }
+  #login-card h1 { margin: 0 0 4px; font-size: 22px; }
+  #login-card p { margin: 0 0 22px; color: var(--muted); font-size: 13px; }
+  #login-card .row { margin-bottom: 12px; }
+  #login-card input { width: 100%; padding: 10px 12px; font-size: 14px; }
+  #login-card button.primary { width: 100%; padding: 10px; font-size: 14px; margin-top: 6px; }
+  #app { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="login-screen" class="hidden">
+  <form id="login-card" autocomplete="on">
+    <h1>SMTP Relay</h1>
+    <p>Sign in to manage providers, routing and delivery.</p>
+    <div class="row"><span>Username</span><input type="text" id="login-user" name="username" autocomplete="username" required></div>
+    <div class="row"><span>Password</span><input type="password" id="login-pass" name="password" autocomplete="current-password" required></div>
+    <div class="err" id="login-error" style="min-height:18px;margin-bottom:8px"></div>
+    <button class="primary" type="submit" id="login-submit">Sign in</button>
+  </form>
+</div>
+
+<div id="app" class="hidden">
+<header>
+  <h1>SMTP Relay</h1>
+  <div class="sub" id="hdr-sub">connecting…</div>
+  <div class="spacer"></div>
+  <label class="inline">Strategy
+    <select id="strategy">
+      <option value="round_robin">round_robin</option>
+      <option value="weighted">weighted</option>
+      <option value="least_used">least_used</option>
+      <option value="failover">failover</option>
+    </select>
+  </label>
+  <span class="live"><span class="dot" id="live-dot"></span><span id="live-text">offline</span></span>
+  <span class="sub" id="whoami"></span>
+  <button id="btn-refresh">Refresh</button>
+  <button id="btn-logout">Sign out</button>
+</header>
+
+<main>
+  <section>
+    <h2>Overview</h2>
+    <div class="cards" id="cards"></div>
+  </section>
+
+  <section>
+    <div class="panel">
+      <div class="panel-head">
+        <strong>Throughput</strong>
+        <span class="sub" style="color:var(--muted);font-size:12px" id="chart-caption">messages per minute</span>
+        <div class="spacer"></div>
+        <label class="inline">Window
+          <select id="window">
+            <option value="15">15m</option>
+            <option value="60" selected>60m</option>
+            <option value="120">120m</option>
+          </select>
+        </label>
+      </div>
+      <div class="panel-body">
+        <canvas id="chart" height="150" style="width:100%;height:150px"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Relays</h2>
+    <div class="panel">
+      <div class="panel-head">
+        <label class="inline"><input type="checkbox" id="check-all"> Select all</label>
+        <span id="selection-count" class="sub" style="color:var(--muted);font-size:12px">0 selected</span>
+        <div class="spacer"></div>
+        <button class="good" id="btn-activate-selected">Activate selected</button>
+        <button class="danger" id="btn-deactivate-selected">Deactivate selected</button>
+        <button id="btn-only-selected">Only selected</button>
+        <span style="width:10px"></span>
+        <button class="good" id="btn-activate-all">Activate all</button>
+        <button class="danger" id="btn-deactivate-all">Deactivate all</button>
+        <button id="btn-probe-all">Health check</button>
+        <button class="primary" id="btn-add-relay">Add SMTP provider</button>
+      </div>
+      <div id="relay-table"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="tabs" id="tabs">
+      <button data-tab="messages" class="active">Recent messages</button>
+      <button data-tab="queue">Retry queue</button>
+      <button data-tab="config">Configuration</button>
+    </div>
+
+    <div class="panel" id="tab-messages">
+      <div class="panel-head">
+        <strong>Recent messages</strong>
+        <label class="inline">Status
+          <select id="msg-status">
+            <option value="all">all</option>
+            <option value="delivered">delivered</option>
+            <option value="deferred">deferred</option>
+            <option value="failed">failed</option>
+            <option value="queued">queued</option>
+            <option value="rejected">rejected</option>
+          </select>
+        </label>
+        <div class="spacer"></div>
+        <button class="danger" id="btn-clear-messages">Clear log</button>
+      </div>
+      <div id="messages-table"></div>
+    </div>
+
+    <div class="panel hidden" id="tab-queue">
+      <div class="panel-head">
+        <strong>Retry queue</strong>
+        <span class="sub" style="color:var(--muted);font-size:12px" id="queue-caption"></span>
+        <div class="spacer"></div>
+        <button class="primary" id="btn-flush">Retry all now</button>
+        <button class="danger" id="btn-purge">Purge queue</button>
+      </div>
+      <div id="queue-table"></div>
+    </div>
+
+    <div class="panel hidden" id="tab-config">
+      <div class="panel-head">
+        <strong>Configuration</strong>
+        <span class="mono" style="color:var(--muted)" id="config-path"></span>
+        <div class="spacer"></div>
+        <button id="btn-reload-config">Reload from disk</button>
+        <button id="btn-save-config">Save to disk</button>
+      </div>
+      <div class="panel-body">
+        <p style="color:var(--muted);margin:0 0 8px;font-size:12.5px">
+          Passwords are shown as <span class="mono">__redacted__</span>. Leave them as-is to keep the stored
+          value; replace one to set a new password. Saving applies the document and rewrites the file.
+        </p>
+        <textarea id="config-json" rows="22" spellcheck="false"></textarea>
+        <div class="actions" style="border:0;padding:10px 0 0">
+          <span class="err" id="config-error"></span>
+          <div class="spacer"></div>
+          <button class="primary" id="btn-apply-config">Apply &amp; save</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<dialog id="relay-dialog">
+  <div class="panel-head"><strong id="relay-dialog-title">Add SMTP provider</strong></div>
+  <form id="relay-form">
+    <div class="panel-body">
+      <input type="hidden" id="relay-editing" value="">
+      <div class="grid-2">
+        <div class="row"><span>Provider id</span><input type="text" id="relay-id" placeholder="relay_node_1" required></div>
+        <div class="row"><span>Enabled</span>
+          <label class="inline" style="margin-top:8px"><input type="checkbox" id="relay-enabled" checked> Active in the pool</label>
+        </div>
+        <div class="row"><span>SMTP host</span><input type="text" id="relay-host" placeholder="smtp.example.com" required></div>
+        <div class="row"><span>Port</span><input type="text" id="relay-port" value="465" required></div>
+        <div class="row"><span>TLS</span>
+          <select id="relay-tls">
+            <option value="tls" selected>SSL / SMTPS (465)</option>
+            <option value="starttls">STARTTLS (587)</option>
+            <option value="none">None (plain)</option>
+            <option value="opportunistic">Opportunistic</option>
+          </select>
+        </div>
+        <div class="row"><span>Weight</span><input type="text" id="relay-weight" value="1" placeholder="relative share"></div>
+        <div class="row"><span>Username</span><input type="text" id="relay-user" placeholder="SMTP login" autocomplete="off"></div>
+        <div class="row"><span>Password</span><input type="password" id="relay-password" placeholder="leave blank to keep" autocomplete="new-password"></div>
+        <div class="row" style="grid-column:1/-1">
+          <span>From address</span>
+          <label class="inline" style="margin-top:8px">
+            <input type="checkbox" id="relay-from-same" checked>
+            Same as username (no extra From field)
+          </label>
+        </div>
+        <div class="row hidden" id="relay-from-row">
+          <span>From address</span>
+          <input type="email" id="relay-from" placeholder="noreply@example.com">
+        </div>
+        <div class="row" style="grid-column:1/-1">
+          <span>MAIL FROM</span>
+          <label class="inline" style="margin-top:8px">
+            <input type="checkbox" id="relay-align">
+            Align envelope with From address (SPF)
+          </label>
+        </div>
+        <div class="row"><span>Limit / minute</span>
+          <div>
+            <label class="inline"><input type="checkbox" id="relay-limit-minute"> Enable</label>
+            <input type="number" id="relay-minute" min="1" placeholder="messages" disabled style="margin-top:6px;width:100%">
+          </div>
+        </div>
+        <div class="row"><span>Limit / hour</span>
+          <div>
+            <label class="inline"><input type="checkbox" id="relay-limit-hour"> Enable</label>
+            <input type="number" id="relay-hour" min="1" placeholder="messages" disabled style="margin-top:6px;width:100%">
+          </div>
+        </div>
+        <div class="row"><span>Limit / day</span>
+          <div>
+            <label class="inline"><input type="checkbox" id="relay-limit-day"> Enable</label>
+            <input type="number" id="relay-day" min="1" placeholder="messages" disabled style="margin-top:6px;width:100%">
+          </div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px"><span>Description</span><input type="text" id="relay-desc" placeholder="Primary transactional identity"></div>
+      <div class="err" id="relay-form-error"></div>
+    </div>
+    <div class="actions">
+      <button type="button" class="danger hidden" id="relay-delete">Delete</button>
+      <div class="spacer"></div>
+      <button type="button" id="relay-cancel">Cancel</button>
+      <button type="submit" class="primary" id="relay-save">Save provider</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="test-dialog">
+  <div class="panel-head"><strong>Send a test message</strong></div>
+  <div class="panel-body">
+    <div class="row"><span>Relay</span><input type="text" id="test-relay" readonly></div>
+    <div class="row"><span>To</span><input type="email" id="test-to" placeholder="you@example.com"></div>
+    <div class="row"><span>Subject</span><input type="text" id="test-subject" placeholder="(default)"></div>
+    <div class="row"><span>Body</span><textarea id="test-body" rows="4" placeholder="(default)"></textarea></div>
+  </div>
+  <div class="actions">
+    <button id="test-cancel">Cancel</button>
+    <button class="primary" id="test-send">Send</button>
+  </div>
+</dialog>
+
+<dialog id="detail-dialog">
+  <div class="panel-head"><strong id="detail-title">Details</strong></div>
+  <div class="panel-body"><pre class="mono" id="detail-body" style="margin:0;white-space:pre-wrap;word-break:break-word"></pre></div>
+  <div class="actions"><button id="detail-close">Close</button></div>
+</dialog>
+
+<div id="toast"></div>
+</div>
+
+<script>
+"use strict";
+
+// Session cookie is HttpOnly; fetch must include it. A query token is still
+// accepted for scripts and EventSource fallbacks.
+let TOKEN = localStorage.getItem("smtp_relay_token") || new URLSearchParams(location.search).get("token") || "";
+
+function authHeaders(extra) {
+  const headers = Object.assign({}, extra || {});
+  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+  return headers;
+}
+
+async function api(path, options) {
+  const config = Object.assign({ method: "GET", credentials: "same-origin" }, options || {});
+  config.headers = authHeaders(config.body ? { "Content-Type": "application/json" } : {});
+
+  const response = await fetch(path, config);
+  if ((response.status === 401 || response.status === 403) && path !== "/api/login" && path !== "/api/session") {
+    showLogin();
+    throw new Error("sign in required");
+  }
+
+  const text = await response.text();
+  let payload = null;
+  try { payload = text ? JSON.parse(text) : null; } catch (_) { payload = { raw: text }; }
+  if (!response.ok) {
+    throw new Error((payload && (payload.error || payload.message)) || ("HTTP " + response.status));
+  }
+  return payload;
+}
+
+// --- small helpers ----------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+
+function escapeHtml(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function toast(message, kind) {
+  const element = document.createElement("div");
+  element.className = "toast " + (kind || "");
+  element.textContent = message;
+  $("toast").appendChild(element);
+  setTimeout(() => element.remove(), kind === "bad" ? 8000 : 4000);
+}
+
+function num(value) {
+  return (value === null || value === undefined) ? "—" : Number(value).toLocaleString();
+}
+
+function ago(iso) {
+  if (!iso) return "—";
+  const seconds = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (seconds < 60) return Math.round(seconds) + "s ago";
+  if (seconds < 3600) return Math.round(seconds / 60) + "m ago";
+  if (seconds < 86400) return Math.round(seconds / 3600) + "h ago";
+  return Math.round(seconds / 86400) + "d ago";
+}
+
+function clock(iso) {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleTimeString();
+}
+
+const STATUS_KIND = {
+  delivered: "ok", queued: "mute", accepted: "mute", sending: "warn",
+  deferred: "warn", failed: "bad", rejected: "bad",
+};
+
+// --- state ------------------------------------------------------------------
+let STATUS = null;
+let RELAYS = [];
+const selected = new Set();
+let currentTab = "messages";
+
+// --- overview cards ---------------------------------------------------------
+function renderCards() {
+  if (!STATUS) return;
+  const counters = STATUS.counters;
+  const relays = STATUS.relays;
+  const queue = STATUS.queue;
+  const rate = STATUS.derived.success_rate_percent;
+
+  const cards = [
+    { label: "Received", value: num(counters.messages_received), foot: STATUS.derived.bytes_received_human },
+    { label: "Delivered", value: num(counters.messages_delivered), foot: "avg " + Math.round(STATUS.derived.average_latency_ms) + " ms", tone: "ok" },
+    { label: "Deferred", value: num(counters.messages_deferred), foot: num(counters.queue_retries) + " retries", tone: counters.messages_deferred > 0 ? "warn" : null },
+    { label: "Failed", value: num(counters.messages_failed + counters.messages_rejected), foot: num(counters.messages_rejected) + " refused, " + num(counters.messages_dead) + " gave up", tone: (counters.messages_failed + counters.messages_rejected) > 0 ? "bad" : null },
+    { label: "Success rate", value: rate.toFixed(1) + "%", foot: "of attempted", tone: rate >= 99 ? "ok" : (rate >= 90 ? "warn" : "bad") },
+    { label: "Relays in rotation", value: relays.eligible + " / " + relays.total, foot: relays.active + " active, " + relays.healthy + " healthy", tone: relays.eligible === 0 ? "bad" : (relays.eligible < relays.total ? "warn" : "ok") },
+    { label: "Queue depth", value: num(queue.depth), foot: queue.in_flight + " sending, " + queue.due + " due", tone: queue.depth > 0 ? "warn" : null },
+    { label: "Connections", value: num(counters.connections_active), foot: num(counters.connections_total) + " total" },
+    { label: "Uptime", value: STATUS.uptime_human, foot: "v" + STATUS.version },
+  ];
+
+  $("cards").innerHTML = cards.map((card) => `
+    <div class="card">
+      <div class="label">${escapeHtml(card.label)}</div>
+      <div class="value ${card.tone || ""}">${escapeHtml(card.value)}</div>
+      <div class="foot">${escapeHtml(card.foot || "")}</div>
+    </div>`).join("");
+
+  $("hdr-sub").textContent = `${STATUS.hostname} · ${STATUS.server.bind_address} · ${STATUS.server.submission_mode} mode`;
+  $("strategy").value = STATUS.routing.strategy;
+  $("config-path").textContent = STATUS.config_path;
+  $("queue-caption").textContent =
+    `${STATUS.queue.depth} waiting · ${STATUS.queue.capacity} capacity · ${STATUS.queue.workers} workers · ` +
+    (STATUS.queue.persistent ? "persistent" : "in-memory");
+}
+
+// --- chart ------------------------------------------------------------------
+function renderChart(series) {
+  const canvas = $("chart");
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth;
+  const height = 150;
+  canvas.width = width * ratio;
+  canvas.height = height * ratio;
+
+  const context = canvas.getContext("2d");
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.clearRect(0, 0, width, height);
+
+  if (!series || !series.length) return;
+  const peak = Math.max(1, ...series.map((b) => Math.max(b.received, b.delivered, b.failed + b.deferred)));
+  const stepX = width / Math.max(1, series.length - 1);
+  const y = (value) => height - 12 - (value / peak) * (height - 26);
+
+  // Horizontal grid plus the peak label.
+  context.strokeStyle = "#26303f";
+  context.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const gridY = 12 + ((height - 26) / 3) * i;
+    context.beginPath();
+    context.moveTo(0, gridY);
+    context.lineTo(width, gridY);
+    context.stroke();
+  }
+  context.fillStyle = "#8a97a8";
+  context.font = "10px ui-sans-serif, sans-serif";
+  context.fillText(String(peak) + "/min", 4, 10);
+
+  const line = (key, colour, fill) => {
+    context.beginPath();
+    series.forEach((bucket, index) => {
+      const value = key === "problems" ? (bucket.failed + bucket.deferred) : bucket[key];
+      const pointX = index * stepX;
+      const pointY = y(value);
+      index === 0 ? context.moveTo(pointX, pointY) : context.lineTo(pointX, pointY);
+    });
+    context.strokeStyle = colour;
+    context.lineWidth = 1.8;
+    context.stroke();
+
+    if (fill) {
+      context.lineTo(width, height - 12);
+      context.lineTo(0, height - 12);
+      context.closePath();
+      context.fillStyle = fill;
+      context.fill();
+    }
+  };
+
+  line("received", "#4f9cf9", "rgba(79,156,249,.12)");
+  line("delivered", "#35c98b", "rgba(53,201,139,.10)");
+  line("problems", "#f2635f", null);
+
+  $("chart-caption").textContent =
+    "messages per minute — blue received, green delivered, red failed+deferred";
+}
+
+// --- relays -----------------------------------------------------------------
+function relayStatusPill(relay) {
+  if (relay.eligible) return '<span class="pill ok">in rotation</span>';
+  const reasons = {
+    deactivated: '<span class="pill mute">deactivated</span>',
+    circuit_open: '<span class="pill bad">circuit open</span>',
+    quota_reached: '<span class="pill warn">quota reached</span>',
+    at_concurrency_limit: '<span class="pill warn">at capacity</span>',
+  };
+  return reasons[relay.ineligible_reason] || '<span class="pill bad">unavailable</span>';
+}
+
+function quotaCell(relay) {
+  const parts = [];
+  if (relay.minute_limit) parts.push(`${relay.minute_count}/${relay.minute_limit}/m`);
+  if (relay.hour_limit) parts.push(`${relay.hour_count}/${relay.hour_limit}/h`);
+  if (relay.day_limit) parts.push(`${relay.day_count}/${relay.day_limit}/d`);
+  if (!parts.length) return `<span style="color:var(--muted)">unlimited</span>`;
+  return parts.join("<br>");
+}
+
+function renderRelays() {
+  if (!RELAYS.length) {
+    $("relay-table").innerHTML = '<div class="empty">No SMTP providers yet. Click <strong>Add SMTP provider</strong> to add the first one.</div>';
+    return;
+  }
+
+  const rows = RELAYS.map((relay) => {
+    const checked = selected.has(relay.id) ? "checked" : "";
+    const latency = relay.average_latency_ms ? Math.round(relay.average_latency_ms) + " ms" : "—";
+    const error = relay.last_error
+      ? `<div class="err mono" style="font-size:11px;margin-top:3px" title="${escapeHtml(relay.last_error)}">${escapeHtml(relay.last_error.slice(0, 70))}</div>`
+      : "";
+    const cooldown = relay.cooldown_remaining_seconds
+      ? `<div style="color:var(--muted);font-size:11px">retry in ${relay.cooldown_remaining_seconds}s</div>`
+      : "";
+
+    return `<tr>
+      <td><input type="checkbox" class="relay-check" data-id="${escapeHtml(relay.id)}" ${checked}></td>
+      <td>
+        <div><strong>${escapeHtml(relay.id)}</strong></div>
+        <div class="mono" style="color:var(--muted);font-size:11.5px">${escapeHtml(relay.host)}:${relay.port} · ${escapeHtml(relay.tls)}${relay.has_auth ? " · auth" : ""}</div>
+      </td>
+      <td class="mono" style="font-size:11.5px">${escapeHtml(relay.from_address)}${relay.align_envelope ? "<br><span style='color:var(--muted)'>SPF aligned</span>" : ""}</td>
+      <td>${relayStatusPill(relay)}${cooldown}${error}</td>
+      <td class="num">
+        <div>${relay.weight_percent.toFixed(0)}%</div>
+        <div class="bar"><i style="width:${Math.min(100, relay.weight_percent)}%"></i></div>
+      </td>
+      <td class="num">${num(relay.sent)}</td>
+      <td class="num">${num(relay.deferred)}</td>
+      <td class="num">${num(relay.failed)}</td>
+      <td class="num">${latency}</td>
+      <td class="num">${relay.in_flight}/${relay.max_concurrent}</td>
+      <td class="num">${quotaCell(relay)}</td>
+      <td style="white-space:nowrap">
+        ${relay.active
+          ? `<button class="tiny danger" data-act="deactivate" data-id="${escapeHtml(relay.id)}">Off</button>`
+          : `<button class="tiny good" data-act="activate" data-id="${escapeHtml(relay.id)}">On</button>`}
+        <button class="tiny" data-act="edit" data-id="${escapeHtml(relay.id)}">Edit</button>
+        <button class="tiny" data-act="probe" data-id="${escapeHtml(relay.id)}">Probe</button>
+        <button class="tiny" data-act="test" data-id="${escapeHtml(relay.id)}">Test</button>
+        <button class="tiny" data-act="detail" data-id="${escapeHtml(relay.id)}">Info</button>
+        ${relay.circuit_state !== "closed" ? `<button class="tiny warn" data-act="reset-circuit" data-id="${escapeHtml(relay.id)}">Reset</button>` : ""}
+      </td>
+    </tr>`;
+  }).join("");
+
+  $("relay-table").innerHTML = `<table>
+    <thead><tr>
+      <th style="width:28px"></th><th>Relay</th><th>Identity</th><th>Status</th>
+      <th class="num">Share</th><th class="num">Sent</th><th class="num">Defer</th><th class="num">Fail</th>
+      <th class="num">Latency</th><th class="num">In flight</th><th class="num">Quota</th><th></th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+
+  updateSelectionUi();
+}
+
+function updateSelectionUi() {
+  const total = RELAYS.length;
+  $("selection-count").textContent = selected.size + " selected";
+  const all = $("check-all");
+  all.checked = total > 0 && selected.size === total;
+  all.indeterminate = selected.size > 0 && selected.size < total;
+  for (const id of ["btn-activate-selected", "btn-deactivate-selected", "btn-only-selected"]) {
+    $(id).disabled = selected.size === 0;
+  }
+}
+
+// --- messages and queue -----------------------------------------------------
+function renderMessages(messages) {
+  if (!messages.length) {
+    $("messages-table").innerHTML = '<div class="empty">No messages yet.</div>';
+    return;
+  }
+  const rows = messages.map((message) => `<tr>
+    <td class="mono" style="font-size:11.5px">${clock(message.received_at)}</td>
+    <td><span class="pill ${STATUS_KIND[message.status] || "mute"}">${escapeHtml(message.status)}</span></td>
+    <td class="mono" style="font-size:11.5px">${escapeHtml(message.original_from)}</td>
+    <td>${escapeHtml((message.recipients || []).slice(0, 2).join(", "))}${(message.recipients || []).length > 2 ? ` +${message.recipients.length - 2}` : ""}</td>
+    <td>${escapeHtml((message.subject || "").slice(0, 60))}</td>
+    <td class="mono" style="font-size:11.5px">${escapeHtml(message.relay_id || "—")}</td>
+    <td class="num">${message.attempts}</td>
+    <td class="num">${message.latency_ms !== null && message.latency_ms !== undefined ? message.latency_ms + " ms" : "—"}</td>
+    <td class="err" style="font-size:11.5px">${escapeHtml((message.error || "").slice(0, 60))}</td>
+    <td><button class="tiny" data-msg="${escapeHtml(message.id)}">Info</button></td>
+  </tr>`).join("");
+
+  $("messages-table").innerHTML = `<table>
+    <thead><tr>
+      <th>Time</th><th>Status</th><th>From</th><th>To</th><th>Subject</th>
+      <th>Relay</th><th class="num">Try</th><th class="num">Latency</th><th>Error</th><th></th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderQueue(queue) {
+  if (!queue.messages.length) {
+    $("queue-table").innerHTML = '<div class="empty">The queue is empty.</div>';
+    return;
+  }
+  const rows = queue.messages.map((entry) => `<tr>
+    <td class="mono" style="font-size:11.5px">${escapeHtml(entry.id)}</td>
+    <td class="mono" style="font-size:11.5px">${escapeHtml(entry.original_from)}</td>
+    <td>${escapeHtml((entry.recipients || []).join(", ").slice(0, 50))}</td>
+    <td>${escapeHtml((entry.subject || "").slice(0, 45))}</td>
+    <td class="num">${entry.attempts}</td>
+    <td class="num">${entry.seconds_until_retry}s</td>
+    <td class="mono" style="font-size:11.5px">${escapeHtml((entry.tried_relays || []).join(", "))}</td>
+    <td class="err" style="font-size:11.5px">${escapeHtml((entry.last_error || "").slice(0, 55))}</td>
+    <td style="white-space:nowrap">
+      <button class="tiny" data-queue-info="${escapeHtml(entry.id)}">Info</button>
+      <button class="tiny danger" data-queue-drop="${escapeHtml(entry.id)}">Drop</button>
+    </td>
+  </tr>`).join("");
+
+  $("queue-table").innerHTML = `<table>
+    <thead><tr>
+      <th>Id</th><th>From</th><th>To</th><th>Subject</th>
+      <th class="num">Try</th><th class="num">Retry in</th><th>Tried</th><th>Last error</th><th></th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// --- loading ----------------------------------------------------------------
+async function loadStatus() {
+  STATUS = await api("/api/status?minutes=" + $("window").value);
+  renderCards();
+  renderChart(STATUS.series);
+}
+
+async function loadRelays() {
+  const payload = await api("/api/relays");
+  RELAYS = payload.relays;
+  for (const id of Array.from(selected)) {
+    if (!RELAYS.some((relay) => relay.id === id)) selected.delete(id);
+  }
+  renderRelays();
+}
+
+async function loadTab() {
+  if (currentTab === "messages") {
+    const status = $("msg-status").value;
+    const payload = await api("/api/messages?limit=100&status=" + encodeURIComponent(status));
+    renderMessages(payload.messages);
+  } else if (currentTab === "queue") {
+    renderQueue(await api("/api/queue?limit=200"));
+  } else if (currentTab === "config") {
+    const payload = await api("/api/config");
+    $("config-json").value = JSON.stringify(payload.config, null, 2);
+    $("btn-apply-config").disabled = !payload.writable;
+  }
+}
+
+let refreshing = false;
+async function refreshAll() {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    await Promise.all([loadStatus(), loadRelays(), loadTab()]);
+  } catch (error) {
+    toast(error.message, "bad");
+  } finally {
+    refreshing = false;
+  }
+}
+
+// --- actions ----------------------------------------------------------------
+async function act(path, options, successMessage) {
+  try {
+    const result = await api(path, options);
+    if (successMessage) toast(successMessage, "ok");
+    await refreshAll();
+    return result;
+  } catch (error) {
+    toast(error.message, "bad");
+    return null;
+  }
+}
+
+function selectedIds() { return Array.from(selected); }
+
+function bulk(action, ids, message) {
+  return act("/api/relays/bulk", {
+    method: "POST",
+    body: JSON.stringify({ action, ids }),
+  }, message);
+}
+
+// --- wiring -----------------------------------------------------------------
+$("btn-refresh").onclick = refreshAll;
+$("window").onchange = loadStatus;
+$("msg-status").onchange = loadTab;
+
+$("strategy").onchange = async (event) => {
+  await act("/api/routing", {
+    method: "PUT",
+    body: JSON.stringify({ strategy: event.target.value }),
+  }, "Routing strategy set to " + event.target.value);
+};
+
+$("check-all").onchange = (event) => {
+  selected.clear();
+  if (event.target.checked) RELAYS.forEach((relay) => selected.add(relay.id));
+  renderRelays();
+};
+
+$("btn-activate-all").onclick = () => act("/api/relays/activate-all", { method: "POST" }, "All relays activated");
+$("btn-deactivate-all").onclick = () => {
+  if (!confirm("Deactivate every relay? New mail will be deferred until one is re-activated.")) return;
+  act("/api/relays/deactivate-all", { method: "POST" }, "All relays deactivated");
+};
+$("btn-activate-selected").onclick = () => bulk("activate", selectedIds(), "Selected relays activated");
+$("btn-deactivate-selected").onclick = () => bulk("deactivate", selectedIds(), "Selected relays deactivated");
+$("btn-only-selected").onclick = () => bulk("exclusive", selectedIds(), "Only the selected relays are active");
+
+$("btn-probe-all").onclick = async () => {
+  toast("Probing every relay…");
+  for (const relay of RELAYS) {
+    await api("/api/relays/" + encodeURIComponent(relay.id) + "/probe", { method: "POST" }).catch(() => null);
+  }
+  await refreshAll();
+  toast("Health check complete", "ok");
+};
+
+$("relay-table").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-act]");
+  if (button) {
+    const id = button.dataset.id;
+    const encoded = encodeURIComponent(id);
+    switch (button.dataset.act) {
+      case "activate": return act(`/api/relays/${encoded}/activate`, { method: "POST" }, id + " activated");
+      case "deactivate": return act(`/api/relays/${encoded}/deactivate`, { method: "POST" }, id + " deactivated");
+      case "reset-circuit": return act(`/api/relays/${encoded}/reset-circuit`, { method: "POST" }, "Circuit breaker reset");
+      case "probe": {
+        const result = await act(`/api/relays/${encoded}/probe`, { method: "POST" });
+        if (result) toast(result.ok ? `${id} reachable in ${result.latency_ms} ms` : `${id}: ${result.error}`, result.ok ? "ok" : "bad");
+        return;
+      }
+      case "edit": {
+        openRelayDialog(RELAYS.find((entry) => entry.id === id));
+        return;
+      }
+      case "test": {
+        $("test-relay").value = id;
+        $("test-dialog").showModal();
+        return;
+      }
+      case "detail": {
+        const relay = RELAYS.find((entry) => entry.id === id);
+        $("detail-title").textContent = "Relay " + id;
+        $("detail-body").textContent = JSON.stringify(relay, null, 2);
+        $("detail-dialog").showModal();
+        return;
+      }
+    }
+  }
+
+  const check = event.target.closest(".relay-check");
+  if (check) {
+    check.checked ? selected.add(check.dataset.id) : selected.delete(check.dataset.id);
+    updateSelectionUi();
+  }
+});
+
+$("messages-table").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-msg]");
+  if (!button) return;
+  try {
+    const record = await api("/api/messages/" + encodeURIComponent(button.dataset.msg));
+    $("detail-title").textContent = "Message " + record.id;
+    $("detail-body").textContent = JSON.stringify(record, null, 2);
+    $("detail-dialog").showModal();
+  } catch (error) { toast(error.message, "bad"); }
+});
+
+$("queue-table").addEventListener("click", async (event) => {
+  const info = event.target.closest("button[data-queue-info]");
+  if (info) {
+    try {
+      const entry = await api("/api/queue/" + encodeURIComponent(info.dataset.queueInfo));
+      const { raw_preview: preview, ...rest } = entry;
+      $("detail-title").textContent = "Queued message " + entry.id;
+      $("detail-body").textContent = JSON.stringify(rest, null, 2) + "\n\n" + preview;
+      $("detail-dialog").showModal();
+    } catch (error) { toast(error.message, "bad"); }
+    return;
+  }
+
+  const drop = event.target.closest("button[data-queue-drop]");
+  if (!drop) return;
+  if (!confirm("Drop this message? It will not be delivered.")) return;
+  act("/api/queue/" + encodeURIComponent(drop.dataset.queueDrop), { method: "DELETE" }, "Message dropped");
+});
+
+$("btn-flush").onclick = () => act("/api/queue/flush", { method: "POST" }, "Queued messages are due now");
+$("btn-purge").onclick = () => {
+  if (!confirm("Purge the whole queue? Messages will be lost.")) return;
+  act("/api/queue", { method: "DELETE" }, "Queue purged");
+};
+$("btn-clear-messages").onclick = () => act("/api/messages", { method: "DELETE" }, "Activity log cleared");
+$("btn-reload-config").onclick = () => act("/api/config/reload", { method: "POST" }, "Configuration reloaded");
+$("btn-save-config").onclick = () => act("/api/config/save", { method: "POST" }, "Configuration written");
+
+$("btn-apply-config").onclick = async () => {
+  $("config-error").textContent = "";
+  let document_;
+  try {
+    document_ = JSON.parse($("config-json").value);
+  } catch (error) {
+    $("config-error").textContent = "Invalid JSON: " + error.message;
+    return;
+  }
+  try {
+    await api("/api/config", { method: "PUT", body: JSON.stringify({ config: document_ }) });
+    toast("Configuration applied and saved", "ok");
+    await refreshAll();
+  } catch (error) {
+    $("config-error").textContent = error.message;
+  }
+};
+
+$("test-cancel").onclick = () => $("test-dialog").close();
+$("detail-close").onclick = () => $("detail-dialog").close();
+$("test-send").onclick = async () => {
+  const relay = $("test-relay").value;
+  const to = $("test-to").value.trim();
+  if (!to) { toast("Enter a recipient address", "bad"); return; }
+
+  const payload = { to };
+  if ($("test-subject").value.trim()) payload.subject = $("test-subject").value.trim();
+  if ($("test-body").value.trim()) payload.body = $("test-body").value;
+
+  $("test-send").disabled = true;
+  try {
+    const result = await api(`/api/relays/${encodeURIComponent(relay)}/test`, {
+      method: "POST", body: JSON.stringify(payload),
+    });
+    toast(`Sent via ${relay} in ${result.latency_ms} ms`, "ok");
+    $("test-dialog").close();
+  } catch (error) {
+    toast("Test failed: " + error.message, "bad");
+  } finally {
+    $("test-send").disabled = false;
+    refreshAll();
+  }
+};
+
+$("tabs").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-tab]");
+  if (!button) return;
+  currentTab = button.dataset.tab;
+  for (const tab of $("tabs").querySelectorAll("button")) tab.classList.toggle("active", tab === button);
+  for (const name of ["messages", "queue", "config"]) $("tab-" + name).classList.toggle("hidden", name !== currentTab);
+  loadTab().catch((error) => toast(error.message, "bad"));
+});
+
+// --- live updates -----------------------------------------------------------
+// Events only trigger a refresh; the REST endpoints stay the single source of
+// truth, so a missed event can never leave the UI permanently stale.
+let stream = null;
+let pending = null;
+
+function scheduleRefresh() {
+  if (pending) return;
+  pending = setTimeout(() => { pending = null; refreshAll(); }, 400);
+}
+
+function setLive(on, text) {
+  $("live-dot").className = "dot " + (on ? "on" : "off");
+  $("live-text").textContent = text;
+}
+
+function connectStream() {
+  if (stream) stream.close();
+  // Cookies are sent automatically; a query token is only needed for scripts.
+  const url = "/api/events" + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "");
+  stream = new EventSource(url);
+
+  stream.onopen = () => setLive(true, "live");
+  stream.onerror = () => {
+    setLive(false, "reconnecting…");
+    stream.close();
+    setTimeout(connectStream, 5000);
+  };
+  for (const kind of ["message", "relay", "queue", "config", "stats", "notice", "lagged"]) {
+    stream.addEventListener(kind, scheduleRefresh);
+  }
+}
+
+// --- login / provider form --------------------------------------------------
+function showLogin() {
+  $("app").classList.add("hidden");
+  $("login-screen").classList.remove("hidden");
+  $("login-user").value = $("login-user").value || "admin";
+  $("login-pass").focus();
+}
+
+function showApp(username) {
+  $("login-screen").classList.add("hidden");
+  $("app").classList.remove("hidden");
+  $("whoami").textContent = username ? username : "";
+  $("btn-logout").classList.toggle("hidden", !username);
+}
+
+function optionalNumber(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function looksLikeEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+}
+
+function syncFromSame() {
+  const same = $("relay-from-same").checked;
+  $("relay-from-row").classList.toggle("hidden", same);
+  if (same) {
+    const user = $("relay-user").value.trim();
+    if (looksLikeEmail(user)) $("relay-from").value = user;
+  }
+}
+
+function syncQuotaInput(checkId, inputId, existing) {
+  const on = $(checkId).checked;
+  $(inputId).disabled = !on;
+  if (!on) {
+    $(inputId).value = "";
+  } else if (existing != null && $(inputId).value === "") {
+    $(inputId).value = existing;
+  }
+}
+
+function openRelayDialog(relay) {
+  const editing = !!relay;
+  $("relay-dialog-title").textContent = editing ? "Edit SMTP provider" : "Add SMTP provider";
+  $("relay-editing").value = editing ? relay.id : "";
+  $("relay-id").value = relay ? relay.id : "";
+  $("relay-id").readOnly = editing;
+  $("relay-enabled").checked = relay ? !!relay.active : true;
+  $("relay-host").value = relay ? relay.host : "";
+  $("relay-port").value = relay ? relay.port : 465;
+  $("relay-tls").value = relay ? relay.tls : "tls";
+  $("relay-weight").value = relay ? relay.weight : 1;
+  $("relay-user").value = relay && relay.username ? relay.username : "";
+  $("relay-password").value = "";
+  $("relay-password").placeholder = editing ? "leave blank to keep current password" : "SMTP password";
+  $("relay-from-same").checked = relay ? !!relay.from_same_as_username : true;
+  $("relay-from").value = relay ? relay.from_address : "";
+  $("relay-align").checked = relay ? !!relay.align_envelope : false;
+  $("relay-limit-minute").checked = !!(relay && relay.minute_limit);
+  $("relay-minute").value = relay && relay.minute_limit ? relay.minute_limit : "";
+  $("relay-limit-hour").checked = !!(relay && relay.hour_limit);
+  $("relay-hour").value = relay && relay.hour_limit ? relay.hour_limit : "";
+  $("relay-limit-day").checked = !!(relay && relay.day_limit);
+  $("relay-day").value = relay && relay.day_limit ? relay.day_limit : "";
+  $("relay-desc").value = relay && relay.description ? relay.description : "";
+  $("relay-form-error").textContent = "";
+  $("relay-delete").classList.toggle("hidden", !editing);
+  syncFromSame();
+  syncQuotaInput("relay-limit-minute", "relay-minute");
+  syncQuotaInput("relay-limit-hour", "relay-hour");
+  syncQuotaInput("relay-limit-day", "relay-day");
+  $("relay-dialog").showModal();
+  $("relay-id").focus();
+}
+
+function relayPayload() {
+  const username = $("relay-user").value.trim();
+  const password = $("relay-password").value;
+  const sameAsUser = $("relay-from-same").checked;
+  const fromAddress = sameAsUser && looksLikeEmail(username)
+    ? username
+    : $("relay-from").value.trim();
+  const payload = {
+    id: $("relay-id").value.trim(),
+    host: $("relay-host").value.trim(),
+    port: Number($("relay-port").value) || 465,
+    tls: $("relay-tls").value,
+    from_address: fromAddress,
+    from_same_as_username: sameAsUser,
+    align_envelope: $("relay-align").checked,
+    weight: Number($("relay-weight").value) || 1,
+    enabled: $("relay-enabled").checked,
+    description: $("relay-desc").value.trim() || null,
+    max_per_minute: $("relay-limit-minute").checked ? optionalNumber($("relay-minute").value) : null,
+    max_per_hour: $("relay-limit-hour").checked ? optionalNumber($("relay-hour").value) : null,
+    max_per_day: $("relay-limit-day").checked ? optionalNumber($("relay-day").value) : null,
+  };
+  if (username && (password || $("relay-editing").value)) {
+    payload.auth = {
+      username,
+      password: password || "__redacted__",
+    };
+  }
+  return payload;
+}
+
+$("btn-add-relay").onclick = () => openRelayDialog(null);
+$("relay-cancel").onclick = () => $("relay-dialog").close();
+$("relay-from-same").onchange = syncFromSame;
+$("relay-user").oninput = syncFromSame;
+$("relay-limit-minute").onchange = () => syncQuotaInput("relay-limit-minute", "relay-minute");
+$("relay-limit-hour").onchange = () => syncQuotaInput("relay-limit-hour", "relay-hour");
+$("relay-limit-day").onchange = () => syncQuotaInput("relay-limit-day", "relay-day");
+$("relay-tls").onchange = () => {
+  if ($("relay-editing").value) return;
+  const ports = { tls: "465", starttls: "587", none: "25", opportunistic: "587" };
+  const port = ports[$("relay-tls").value];
+  if (port) $("relay-port").value = port;
+};
+$("relay-form").onsubmit = async (event) => {
+  event.preventDefault();
+  $("relay-form-error").textContent = "";
+  const editing = $("relay-editing").value;
+  const payload = relayPayload();
+  if (!payload.id || !payload.host) {
+    $("relay-form-error").textContent = "Id and host are required.";
+    return;
+  }
+  if (payload.from_same_as_username) {
+    const username = $("relay-user").value.trim();
+    if (!looksLikeEmail(username) && !payload.from_address) {
+      $("relay-form-error").textContent = "Username must be an email, or uncheck “same as username” and set From.";
+      return;
+    }
+  } else if (!payload.from_address) {
+    $("relay-form-error").textContent = "From address is required when it is not the same as username.";
+    return;
+  }
+  if ($("relay-limit-minute").checked && payload.max_per_minute == null) {
+    $("relay-form-error").textContent = "Enter a per-minute limit, or disable the checkbox.";
+    return;
+  }
+  if ($("relay-limit-hour").checked && payload.max_per_hour == null) {
+    $("relay-form-error").textContent = "Enter a per-hour limit, or disable the checkbox.";
+    return;
+  }
+  if ($("relay-limit-day").checked && payload.max_per_day == null) {
+    $("relay-form-error").textContent = "Enter a per-day limit, or disable the checkbox.";
+    return;
+  }
+  $("relay-save").disabled = true;
+  try {
+    const path = editing
+      ? "/api/relays/" + encodeURIComponent(editing)
+      : "/api/relays";
+    await api(path, {
+      method: editing ? "PUT" : "POST",
+      body: JSON.stringify(payload),
+    });
+    toast(editing ? "Provider updated" : "SMTP provider added", "ok");
+    $("relay-dialog").close();
+    await refreshAll();
+  } catch (error) {
+    $("relay-form-error").textContent = error.message;
+  } finally {
+    $("relay-save").disabled = false;
+  }
+};
+$("relay-delete").onclick = async () => {
+  const id = $("relay-editing").value;
+  if (!id || !confirm("Delete provider `" + id + "`? Mail will stop using it immediately.")) return;
+  try {
+    await api("/api/relays/" + encodeURIComponent(id), { method: "DELETE" });
+    toast("Provider deleted", "ok");
+    $("relay-dialog").close();
+    await refreshAll();
+  } catch (error) {
+    $("relay-form-error").textContent = error.message;
+  }
+};
+
+$("login-card").onsubmit = async (event) => {
+  event.preventDefault();
+  $("login-error").textContent = "";
+  $("login-submit").disabled = true;
+  try {
+    const result = await api("/api/login", {
+      method: "POST",
+      body: JSON.stringify({
+        username: $("login-user").value.trim(),
+        password: $("login-pass").value,
+      }),
+    });
+    $("login-pass").value = "";
+    showApp(result.username);
+    await refreshAll();
+    connectStream();
+  } catch (error) {
+    $("login-error").textContent = error.message;
+  } finally {
+    $("login-submit").disabled = false;
+  }
+};
+
+$("btn-logout").onclick = async () => {
+  try { await api("/api/logout", { method: "POST" }); } catch (_) {}
+  TOKEN = "";
+  localStorage.removeItem("smtp_relay_token");
+  if (stream) stream.close();
+  showLogin();
+};
+
+async function boot() {
+  try {
+    const session = await api("/api/session");
+    $("login-user").value = session.display_username || "admin";
+    if (session.login_required && !session.authenticated) {
+      showLogin();
+      return;
+    }
+    showApp(session.username);
+    await refreshAll();
+    connectStream();
+  } catch (error) {
+    showLogin();
+    $("login-error").textContent = error.message;
+  }
+}
+
+boot();
+setInterval(() => { if ($("app").classList.contains("hidden")) return; if (!stream || stream.readyState !== 1) refreshAll(); }, 15000);
+window.addEventListener("resize", () => { if (STATUS) renderChart(STATUS.series); });
+</script>
+</body>
+</html>

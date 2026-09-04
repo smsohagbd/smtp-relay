@@ -1,0 +1,47 @@
+[package]
+name = "smtp-relay"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Pearl Engineering"]
+description = "High-performance asynchronous SMTP proxy and load-balancing relay daemon"
+license = "MIT"
+readme = "README.md"
+
+[[bin]]
+name = "smtp-relay"
+path = "src/main.rs"
+
+[features]
+default = ["tls-native"]
+# TLS backend for the outbound SMTP client. `tls-native` uses SChannel on
+# Windows and OpenSSL on Linux/macOS. `tls-rustls` is a pure-Rust alternative
+# that is usually the better choice for containerised Linux deployments.
+tls-native = ["lettre/tokio1-native-tls"]
+tls-rustls = ["lettre/tokio1-rustls-tls"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "tokio1",
+    "hostname",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+thiserror = "1"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"

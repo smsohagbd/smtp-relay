@@ -1,0 +1,12 @@
+/target
+# Real configuration files hold relay passwords; only the example is tracked.
+/config.yaml
+/config.yml
+/config.toml
+/config.json
+/config.*.bak
+/spool
+/logs
+*.log
+# Smoke-test output.
+/smoke/received.eml

@@ -1,0 +1,35 @@
+# Configuration for the local smoke test: one relay pointing at
+# smoke/fake_upstream.py, no TLS, no persistence, no health probing.
+server:
+  bind_address: "127.0.0.1:2525"
+  hostname: "smoke-proxy.local"
+  submission_mode: "direct"
+  allowed_networks: ["127.0.0.0/8"]
+
+routing:
+  strategy: "weighted"
+
+queue:
+  persist: false
+  workers: 2
+
+health:
+  enabled: false
+
+admin:
+  bind_address: "127.0.0.1:8025"
+  allow_config_write: false
+
+logging:
+  level: "info,smtp_relay=debug"
+
+relays:
+  - id: "fake_one"
+    host: "127.0.0.1"
+    port: 3025
+    tls: "none"
+    auth:
+      username: "mailer@domain1.com"
+      password: "secret_password_1"
+    from_address: "noreply@domain1.com"
+    weight: 100

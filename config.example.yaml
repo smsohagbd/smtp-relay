@@ -1,0 +1,291 @@
+# ---------------------------------------------------------------------------
+# smtp-relay - SMTP proxy and load-balancing relay
+# ---------------------------------------------------------------------------
+# Every section below is optional: a file containing only a `relays:` list is a
+# valid configuration. The values shown here are the built-in defaults unless
+# a comment says otherwise, so you can delete anything you do not need.
+#
+# TOML and JSON are also accepted - the format is chosen from the file
+# extension (.yaml/.yml, .toml, .json).
+# ---------------------------------------------------------------------------
+
+server:
+  # Address the inbound SMTP listener binds to. Point Mautic here.
+  bind_address: "0.0.0.0:1025"
+
+  # Name announced in the SMTP banner and in our own `Received` header.
+  hostname: "smtp-proxy.local"
+
+  # Largest accepted DATA payload. Also advertised through the SIZE extension,
+  # so well-behaved clients refuse oversized mail before transferring it.
+  max_message_size_mb: 25
+
+  # Per-command idle timeout for inbound sessions.
+  timeout_seconds: 30
+
+  # Hard ceiling on simultaneously open inbound connections.
+  max_connections: 512
+
+  # Maximum RCPT TO commands accepted in one transaction.
+  max_recipients_per_message: 1000
+
+  # Require a successful AUTH before MAIL FROM is accepted. Enable this if the
+  # listener is reachable from anywhere other than localhost, and add at least
+  # one entry to `auth_users` below.
+  require_auth: false
+
+  # When the inbound session reports success to Mautic:
+  #   queue  - accept, spool, deliver in the background (highest throughput;
+  #            the client always sees 250 for accepted mail)
+  #   direct - deliver upstream first and pass the upstream verdict back, so
+  #            Mautic owns the retry. This is the safest default for campaigns
+  #            where you want bounces visible in Mautic itself.
+  #   hybrid - try once inline, fall back to the queue on a transient error
+  submission_mode: "queue"
+
+  # Optional override of the 220 banner text.
+  # greeting: "mail.example.com ESMTP ready"
+
+  # CIDRs permitted to submit mail. Empty means accept from anywhere, which is
+  # only safe when the listener is bound to a private interface.
+  allowed_networks:
+    - "127.0.0.0/8"
+    - "::1/128"
+    # - "10.0.0.0/8"
+    # - "172.16.0.0/12"
+
+  # Credentials accepted by the inbound AUTH PLAIN / AUTH LOGIN.
+  auth_users: []
+  # auth_users:
+  #   - username: "mautic"
+  #     password: "change-me"
+
+routing:
+  # round_robin - equal share, strict rotation
+  # weighted    - honour each relay's `weight` as a percentage (smooth WRR)
+  # least_used  - always prefer the relay that has sent least this hour
+  # failover    - strict `priority` order, only move down when a relay is down
+  strategy: "weighted"
+
+  # Pin a sender or a recipient domain to one relay so a campaign keeps a
+  # consistent identity: none | sender | recipient_domain
+  sticky: "none"
+
+  # On a relay-side failure, offer the message to the next eligible relay
+  # instead of deferring it.
+  fallback_on_failure: true
+
+  # How many distinct relays one message may be offered to per delivery pass.
+  max_attempts_per_message: 3
+
+  # Force specific recipient domains onto specific relays. `*.example.com`
+  # matches subdomains. Listed relays are tried in order.
+  domain_overrides: []
+  # domain_overrides:
+  #   - domain: "gmail.com"
+  #     relay_ids: ["relay_node_1"]
+  #   - domain: "*.gov.uk"
+  #     relay_ids: ["relay_node_2", "relay_node_1"]
+
+rewrite:
+  # Replace the From *address* with the selected relay's identity. The
+  # original display name is never overridden.
+  rewrite_from: true
+
+  # Keep the original display name when rewriting From, so recipients still
+  # see "Jane from Acme <noreply@relaydomain.com>".
+  preserve_display_name: true
+
+  # Insert `Reply-To: <original From>` when the message has no Reply-To.
+  # Off by default: incoming headers stay as they arrived.
+  inject_reply_to: false
+
+  # Used when the message has neither a Reply-To nor a parsable From.
+  # reply_to_fallback: "support@example.com"
+
+  # Incoming DKIM / ARC signatures are kept by default. From-address rewrite
+  # may invalidate them; enable these only if you want them stripped so the
+  # upstream can re-sign.
+  strip_dkim: false
+  strip_arc: false
+
+  # Remove a Bcc header the client left in place. Envelope recipients are
+  # unaffected - blind recipients still receive the message, their addresses
+  # just stop being disclosed to everyone else.
+  strip_bcc_header: false
+
+  # Drop the inbound Received trace chain (hides your internal topology).
+  strip_received: false
+
+  # Prepend our own Received header for traceability. Off by default.
+  add_received_header: false
+
+  # Synthesise Message-ID / Date when the client did not supply them.
+  ensure_message_id: true
+  ensure_date: true
+
+  # Add X-Relay-Node / X-Original-From / X-Queue-Id diagnostics. Off by
+  # default so the inbound message is otherwise left intact.
+  add_relay_headers: false
+
+  # Value for X-Mailer. Omit to leave any existing header alone.
+  # x_mailer: "smtp-relay"
+
+  # Header names removed from every message (case-insensitive).
+  remove_headers: []
+  # remove_headers: ["X-Mautic-Internal", "Sender"]
+
+  # Headers force-set on every message. Anything RFC-legal is accepted, which
+  # covers List-Unsubscribe and friends.
+  extra_headers: []
+  # extra_headers:
+  #   - name: "List-Unsubscribe"
+  #     value: "<mailto:unsubscribe@example.com>"
+  #   - name: "List-Unsubscribe-Post"
+  #     value: "List-Unsubscribe=One-Click"
+
+queue:
+  enabled: true
+
+  # Concurrent delivery workers draining the queue.
+  workers: 8
+
+  # Messages held before new submissions are refused with a 4xx.
+  capacity: 10000
+
+  # Total delivery attempts before a message is declared dead.
+  max_attempts: 5
+
+  # Retry schedule: 30s, 90s, 4m30s, 13m30s, ... capped at max_backoff_seconds.
+  initial_backoff_seconds: 30
+  backoff_multiplier: 3.0
+  max_backoff_seconds: 3600
+
+  # Write queued messages to disk so a restart does not lose mail. The spool
+  # holds message bodies, so put it on a volume you trust.
+  persist: true
+  directory: "./spool"
+
+health:
+  enabled: true
+
+  # Each relay gets a connect + EHLO + NOOP probe on this interval.
+  interval_seconds: 60
+  timeout_seconds: 10
+
+  # Consecutive failures that trip the circuit breaker, and consecutive good
+  # probes needed to close it again.
+  failure_threshold: 3
+  success_threshold: 1
+
+  # How long a tripped relay stays out of rotation before being re-probed.
+  cooldown_seconds: 300
+
+  # Trip the breaker automatically on repeated delivery failures, and bring
+  # the relay back automatically once probes succeed.
+  auto_disable: true
+  auto_recover: true
+
+  # Probe every relay once during startup so the dashboard is accurate
+  # immediately.
+  probe_on_start: true
+
+admin:
+  # REST API, Prometheus metrics and the bundled dashboard.
+  enabled: true
+  bind_address: "127.0.0.1:8025"
+
+  # Dashboard login. Set a password to enable the sign-in page. Username is
+  # compared case-insensitively. While the password is empty, loopback clients
+  # can open the dashboard without signing in.
+  username: "admin"
+  password: "admin"
+
+  # Optional Bearer token for scripts and Prometheus scrapers. Remote API
+  # clients need this (or a dashboard session) once you bind off-loopback.
+  api_token: ""
+
+  # Serve the bundled HTML dashboard at /.
+  dashboard_enabled: true
+
+  # Permit endpoints that rewrite this file on disk. Set to false to make the
+  # dashboard read-only apart from live relay toggles.
+  allow_config_write: true
+
+  # CIDRs permitted to reach the admin API. Empty means no CIDR filter.
+  allowed_networks: []
+  # allowed_networks: ["127.0.0.0/8", "10.0.0.0/8"]
+
+logging:
+  # error | warn | info | debug | trace, or a full RUST_LOG filter such as
+  # "info,smtp_relay::smtp=debug". RUST_LOG in the environment wins.
+  level: "info"
+
+  # text | compact | json. Use json when shipping to Loki/ELK/Datadog.
+  format: "text"
+
+  # Directory for rolling daily log files. Omit to log to stdout only.
+  # directory: "./logs"
+  file_prefix: "smtp-relay"
+
+  # Log the full rewritten header block at debug level. Verbose, but the
+  # fastest way to diagnose an SPF/DKIM alignment problem.
+  log_headers: false
+
+# ---------------------------------------------------------------------------
+# relays:
+# ---------------------------------------------------------------------------
+# Each entry is one upstream identity. By default only the `From` address is
+# rewritten to this relay's identity; the original display name, MAIL FROM
+# and DKIM/ARC signatures are left alone. Set `align_envelope: true` on a
+# provider if you want MAIL FROM rewritten to match From (SPF alignment).
+#
+# `from_same_as_username: true` (the default) copies From from the SMTP
+# username when that username is an email address, so you do not type it twice.
+#
+# With strategy "weighted", `weight` is a relative share - the values below
+# happen to sum to 100, so they read as percentages.
+# ---------------------------------------------------------------------------
+
+relays:
+  - id: "relay_node_1"
+    host: "smtp.domain1.com"
+    port: 465
+    tls: "tls"                 # none | starttls | tls | opportunistic
+    auth:
+      username: "mailer@domain1.com"
+      password: "secret_password_1"
+      # mechanism: "login"     # default offers PLAIN then LOGIN
+    from_same_as_username: true  # From is copied from username
+    # from_address: "noreply@domain1.com"  # only needed when the checkbox is off
+    align_envelope: false      # true = rewrite MAIL FROM to the From address
+    weight: 40                 # 40% of traffic
+    priority: 100              # lower wins under the failover strategy
+    enabled: true              # toggled live from the dashboard, persisted here
+    # Quotas are off until you set a value. Enable one, then fill it in.
+    # max_per_minute: 60
+    # max_per_hour: 5000
+    # max_per_day: 50000
+    max_concurrent: 8          # simultaneous deliveries on this relay
+    # timeout_seconds: 30      # overrides server.timeout_seconds
+    # helo_name: "mail.example.com"
+    allow_invalid_certs: false # only ever true for a test upstream
+    description: "Primary transactional identity"
+    tags: ["primary", "transactional"]
+
+  - id: "relay_node_2"
+    host: "smtp.domain2.com"
+    port: 465
+    tls: "tls"
+    auth:
+      username: "mailer@domain2.com"
+      password: "secret_password_2"
+    from_same_as_username: false
+    from_address: "newsletter@domain2.com"
+    align_envelope: false
+    weight: 60                 # 60% of traffic
+    priority: 200
+    enabled: true
+    max_concurrent: 16
+    description: "Bulk newsletter identity"
+    tags: ["bulk", "newsletter"]
