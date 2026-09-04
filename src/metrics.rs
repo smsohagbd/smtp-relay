@@ -446,6 +446,7 @@ impl ActivityLog {
     }
 
     /// Most recent records first, optionally filtered by status or relay.
+    #[cfg(test)]
     pub fn recent(
         &self,
         limit: usize,
@@ -795,6 +796,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }

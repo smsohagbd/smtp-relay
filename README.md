@@ -1,268 +1,149 @@
 # smtp-relay
 
-An SMTP **proxy and load balancer**. Your app (Mautic, WordPress, Laravel, a
-script) sends mail to this server. smtp-relay rewrites only the `From` *address*,
-picks an upstream SMTP provider from a pool, and delivers. It does not store
-mailboxes.
+**Version 1.0.0** — open-source SMTP relay, SMTP proxy, and outbound load balancer.
+
+Self-hosted on your own server. One inbound SMTP port for every app. Many
+upstream SMTP accounts (cPanel, Gmail, Microsoft 365, Amazon SES, SendGrid,
+or any host:port login). The dashboard is the control panel.
+
+If you are looking for an SMTP relay app, a mail gateway, or a way to send
+through **multiple SMTP providers** without changing your software — this is it.
+
+It is not an inbox. It does not store mailboxes. It only accepts, routes, and
+sends.
 
 ```
-  Your app                 smtp-relay                      Upstream SMTPs
-  (Mautic, …)              :1025 inbound                   smtp.provider1.com
-       │                   :8025 dashboard                      │
-       └──── AUTH ────────►  rewrite → pick relay → send  ──────┘
+Your app                   smtp-relay                    SMTP providers
+CRM, shop, forms           :1025  inbound SMTP           cPanel · SES · Gmail
+newsletter, transactional  :8025  web dashboard          Microsoft 365 · any
+      ──────────────────►  From rewrite · pick · send  ──────────────►
 ```
 
-- Only the From **email** is changed. Display name, body, To/Cc/Bcc, DKIM/ARC stay.
-- `MAIL FROM` stays original unless you enable SPF alignment on that provider.
-- Dashboard is mobile-friendly. Providers can be added, cloned, bulk-imported, tested.
+Works with **any program that can send SMTP**: websites, CRMs, ERP, helpdesks,
+newsletters, custom scripts. No plugin and no vendor lock-in.
 
----
+## What it does
 
-## Install (Linux)
+- One SMTP endpoint for all of your software (default port **1025**)
+- **SMTP load balancing** across a pool of providers (round-robin, weighted,
+  least-used, or failover)
+- Rewrites only the **From email** to the selected account  
+  Display name is kept (`Jane <noreply@your-smtp.com>`)
+- Body, tracking links, images, To / Cc / Bcc are unchanged
+- Automatic retry if a provider fails; circuit breaker skips a dead account
+- Web UI: add, clone, bulk-import, test, pause, or delete providers
+- Disk mail log like Postfix/Exim: `/var/log/smtp-relay/maillog`
 
-You need a VPS or machine you can SSH into. Then:
+Your apps never see the real SMTP passwords. They only talk to smtp-relay.
+
+## Install
+
+Linux VPS (Ubuntu / Debian and similar). SSH in, then:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y git curl
+sudo apt-get update
+sudo apt-get install -y git curl
 git clone https://github.com/smsohagbd/smtp-relay.git
 cd smtp-relay
 chmod +x setup.sh
 ./setup.sh
 ```
 
-`setup.sh` does everything else:
+`setup.sh` installs the compiler and Rust if needed, asks four questions,
+builds the release binary, and starts `smtp-relay` as a systemd service.
 
-1. Installs the compiler, OpenSSL headers, and **Rust** if they are missing  
-2. Asks for admin name, password, SMTP port, web port (Enter = defaults)  
-3. Writes `config.yaml` (and `/etc/smtp-relay/config.yaml`)  
-4. Builds a release binary  
-5. Enables and starts `smtp-relay.service`
-
-**Defaults if you press Enter on every prompt**
-
-| Item | Default |
+| Prompt | Default (press Enter) |
 | --- | --- |
-| Dashboard + SMTP username | `admin` |
-| Password | `admin` |
+| Admin username | `admin` |
+| Admin password | `admin` |
 | Inbound SMTP port | `1025` |
 | Dashboard port | `8025` |
 
-If `config.yaml` already exists it asks before overwriting. Answer `N` to keep your relays and still rebuild the service.
-
-**Windows:** `powershell -File setup.ps1` writes a config only. Build with Rust from [rustup.rs](https://rustup.rs/).
-
----
-
-## After setup
-
-Open the dashboard (use your server IP and the web port you chose):
+The first build takes a few minutes. When it finishes:
 
 ```
-http://YOUR-SERVER-IP:8025/
+Dashboard : http://YOUR-SERVER-IP:8025/
+SMTP      : YOUR-SERVER-IP:1025  user admin
 ```
 
-Sign in with the username/password from setup. Then **Add SMTP provider** (or **Bulk add** / **Clone**).
+Open the dashboard with **http** (not https). Sign in with the user and
+password you chose.
 
-New providers default to **port 465 / SSL**. If the username is an email, From is filled from it. The connection is tested before save.
+Already have a `config.yaml`? When it asks **Overwrite?**, choose **N** to
+keep your providers and still upgrade the binary.
 
-Point Mautic (or any mailer) at the **relay**, not at Gmail/SES directly:
+## Use it
+
+### 1. Add SMTP providers
+
+Dashboard → **Add SMTP provider** → host, port, username, password →
+**Test & save**.
+
+New accounts default to **port 465 / SSL**. If the username is an email, it
+is used as the From address. Clone or bulk-import when you have many logins.
+
+### 2. Point your software at the relay
+
+In your app’s “custom SMTP” / “other SMTP server” settings:
 
 | Setting | Value |
 | --- | --- |
-| Host | your server IP |
-| Port | `1025` (or whatever you set) |
-| Encryption | none |
-| Authentication | yes |
-| Username / password | same as dashboard (`admin` / `admin` unless you changed them) |
+| Host | server IP — or `127.0.0.1` if the app runs on the **same** machine |
+| Port | `1025` |
+| Encryption | None |
+| Authentication | Login |
+| Username / password | same as the dashboard login |
 
-Leave the app’s display name and From as the real sender. The relay rewrites only the address to the selected upstream identity.
+Do not put the upstream Gmail/cPanel host in the app. Put **smtp-relay** there.
 
-Change the SMTP or dashboard password later in `/etc/smtp-relay/config.yaml`:
+Same-server installs should use `127.0.0.1`. Connecting to the public IP from
+the host itself often returns “connection refused”.
 
-```yaml
-server:
-  require_auth: true
-  auth_users:
-    - username: "admin"
-      password: "new-smtp-password"
+### 3. Send
 
-admin:
-  username: "admin"
-  password: "new-dashboard-password"
-```
+The app keeps the display name. smtp-relay sends with the provider identity  
+(`Jane <info@your-smtp.com>`).
 
-Then `sudo systemctl restart smtp-relay`.
-
----
-
-## Where logs live
-
-| What | Where | How long |
-| --- | --- | --- |
-| Mail log (Postfix/Exim style) | `/var/log/smtp-relay/maillog` | Daily rotate to `maillog-YYYY-MM-DD`; append-only |
-| Dashboard list index | `/var/log/smtp-relay/activity.jsonl` | Same rotate; Delete buttons rewrite this file only |
-| Retry queue (mail waiting to send) | `/var/lib/smtp-relay/spool` | Until delivered, failed, or purged |
-| Process log | `smtp-relay.YYYY-MM-DD` in the same dir + `journalctl -u smtp-relay` | Daily files + systemd journal |
-
-Nothing in that table lives in RAM as a growing ring. `tail -f /var/log/smtp-relay/maillog` is the live mail log:
-
-```
-Sep  5 02:17:05 smtp-relay: qid: from=<info@…>, to=<lead@gmail.com>, relay=node1, status=deferred, err="501 …"
-```
-
-Dashboard is **50 per page**. **Delete deferred**, **Delete failed**, and **Delete all** remove matching rows from both the dashboard and the `maillog` files. The retry queue is not touched. You can also delete files yourself:
-
-```bash
-sudo truncate -s 0 /var/log/smtp-relay/maillog
-sudo rm -f /var/log/smtp-relay/maillog-* /var/log/smtp-relay/activity.jsonl /var/log/smtp-relay/activity-*.jsonl
-```
-
-`setup.sh` sets:
-
-```yaml
-logging:
-  directory: "/var/log/smtp-relay"
-  file_prefix: "smtp-relay"
-```
-
-Dashboard login: **5 wrong passwords** from one IP locks that IP for **15 minutes** (`admin.login_max_failures` / `login_block_seconds`).
-
-```bash
-sudo tail -f /var/log/smtp-relay/maillog
-sudo journalctl -u smtp-relay -f
-```
-
-`config.yaml` is not in git (it holds secrets). The copy the service uses is:
-
-`/etc/smtp-relay/config.yaml`
-
----
-
-## Daily commands
+## Commands
 
 ```bash
 sudo systemctl status smtp-relay
 sudo systemctl restart smtp-relay
 sudo journalctl -u smtp-relay -f
+sudo tail -f /var/log/smtp-relay/maillog
 ```
 
-After `git pull` on the server, run `./setup.sh` again (keep the existing config) so the binary and service update.
+## Upgrade
 
----
+```bash
+cd ~/smtp-relay
+git checkout -- setup.sh
+git pull
+./setup.sh
+```
 
-## What it does to a message
+Answer **N** to keep the existing config.
 
-| Step | Behaviour |
+If `git pull` refuses because `setup.sh` changed locally:
+
+```bash
+git checkout -- setup.sh
+git pull
+```
+
+## Files
+
+| Path | What it is |
 | --- | --- |
-| Parse | Headers split from the body byte-exactly. HTML, pixels, links, MIME are never re-encoded. |
-| Keep | Subject, To, Cc, Bcc, body, display name, incoming DKIM/ARC. |
-| From | Only the address becomes the selected relay identity. |
-| Envelope | Rewritten to the relay From when sending as the SMTP username, or when **Align envelope** is on. |
-| Quotas | Per minute / hour / day, off until you enable them on the provider. |
+| `/etc/smtp-relay/config.yaml` | Live settings and passwords |
+| `/var/log/smtp-relay/maillog` | Mail log |
+| `/var/lib/smtp-relay/spool` | Messages waiting to retry |
 
----
+**Delete deferred / failed / all** in the dashboard removes those log lines.
+The retry queue is left alone.
 
-## Features
-
-- Strategies: `round_robin`, `weighted`, `least_used`, `failover`
-- Sticky routing, per-domain overrides, fallback on failure
-- Retry queue + disk spool, circuit breaker, health probes
-- Activate / deactivate / clone / bulk-import providers
-- Test-before-save, probe, send-test
-- Dashboard + REST API + Prometheus `/metrics`
-
-Every option is documented in [`config.example.yaml`](config.example.yaml).
-
----
-
-## Configuration (optional)
-
-Minimum relay list (you can also add these only from the UI):
-
-```yaml
-relays:
-  - id: "relay_node_1"
-    host: "smtp.domain1.com"
-    port: 465
-    tls: "tls"                 # none | starttls | tls | opportunistic
-    auth:
-      username: "mailer@domain1.com"
-      password: "secret"
-    from_same_as_username: true
-    align_envelope: true
-    weight: 40
-```
-
-**Bulk add** in the dashboard, one line per provider:
-
-```
-host:port:user:pass:ssl
-host:port:user:pass:ssl:from@domain.com
-```
-
-Use `|` instead of `:` if the password contains colons. TLS token: `ssl`, `tls`, `starttls`, `none`.
-
-Config search order: `--config`, `$SMTP_RELAY_CONFIG`, `./config.yaml`, `/etc/smtp-relay/config.yaml`.
-
-```
-smtp-relay --check
-smtp-relay --print-config
-smtp-relay --probe
-smtp-relay -c /path/to/config.yaml
-```
-
----
-
-## API (short)
-
-Dashboard login sets a cookie. Scripts can use `Authorization: Bearer <admin.api_token>`.
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/healthz` `/readyz` `/metrics` | Health and Prometheus |
-| `GET` | `/api/status` | Overview |
-| `GET`/`POST` | `/api/relays` | List or add (add probes first) |
-| `POST` | `/api/relays/import` | Bulk add from text |
-| `PUT`/`DELETE` | `/api/relays/{id}` | Update or delete |
-| `POST` | `/api/relays/{id}/probe` `/test` | Health probe / send test mail |
-| `GET` | `/api/messages?limit=50&page=1&status=` | Activity log (50 per page) |
-| `DELETE` | `/api/messages` or `?status=deferred` / `failed` | Clear all, or one status |
-
----
-
-## Docker
-
-```bash
-cargo build --release --no-default-features --features tls-rustls
-```
-
-```dockerfile
-FROM rust:1-slim AS build
-WORKDIR /src
-COPY . .
-RUN cargo build --release --no-default-features --features tls-rustls
-
-FROM debian:stable-slim
-RUN adduser --system --group --home /var/lib/smtp-relay smtp-relay \
- && install -d -o smtp-relay -g smtp-relay /var/lib/smtp-relay/spool
-COPY --from=build /src/target/release/smtp-relay /usr/local/bin/smtp-relay
-USER smtp-relay
-WORKDIR /var/lib/smtp-relay
-EXPOSE 1025 8025
-ENV SMTP_RELAY_CONFIG=/etc/smtp-relay/config.yaml
-ENTRYPOINT ["smtp-relay"]
-```
-
----
-
-## Tests
-
-```bash
-cargo test
-```
-
-`smoke/` is a Python harness (fake upstream + submitter). See that folder.
+Five failed dashboard logins from one IP lock that IP for 15 minutes.
 
 ## Licence
 
-MIT.
+MIT
