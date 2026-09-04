@@ -394,7 +394,7 @@ pub struct AdminConfig {
     pub bind_address: String,
     /// Dashboard login name. Compared case-insensitively.
     pub username: String,
-    /// Dashboard login password. When set, every client (including loopback)
+    /// Dashboard login password. When set, every client (including remote)
     /// must sign in. When empty, loopback stays open and remote clients need
     /// `api_token`.
     pub password: String,
@@ -412,6 +412,12 @@ impl AdminConfig {
     /// A non-empty password turns the dashboard into a signed-in surface.
     pub fn login_required(&self) -> bool {
         !self.password.trim().is_empty()
+    }
+
+    /// Remote (non-loopback) clients are allowed when a dashboard password
+    /// or an API token is configured.
+    pub fn remote_access_configured(&self) -> bool {
+        self.login_required() || !self.api_token.trim().is_empty()
     }
 }
 

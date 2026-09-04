@@ -195,9 +195,10 @@ admin:
   enabled: true
   bind_address: "127.0.0.1:8025"
 
-  # Dashboard login. Set a password to enable the sign-in page. Username is
-  # compared case-insensitively. While the password is empty, loopback clients
-  # can open the dashboard without signing in.
+  # Dashboard login. A password is enough for remote access: the sign-in page
+  # is public, then the session cookie authorises the API. Username is
+  # compared case-insensitively. While the password is empty, only loopback
+  # clients can use the API unless api_token is set.
   username: "admin"
   password: "admin"
 

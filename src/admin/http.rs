@@ -212,12 +212,13 @@ pub async fn serve(state: Arc<AppState>, handler: Handler) -> std::io::Result<()
     tracing::info!(
         %address,
         dashboard = config.admin.dashboard_enabled,
+        login_required = config.admin.login_required(),
         token_required = !config.admin.api_token.is_empty(),
         "admin API ready"
     );
-    if config.admin.api_token.is_empty() {
+    if !config.admin.remote_access_configured() {
         tracing::warn!(
-            "admin.api_token is empty: only loopback clients will be able to reach the API"
+            "admin.password and admin.api_token are empty: only loopback clients can reach the API"
         );
     }
 
@@ -256,6 +257,22 @@ async fn serve_connection(
     peer: SocketAddr,
 ) -> std::io::Result<()> {
     let _ = stream.set_nodelay(true);
+
+    // Chrome HTTPS-First / a bookmark with https:// sends a TLS ClientHello
+    // here. There is no newline, so the line reader would sit silent and the
+    // browser would show ERR_EMPTY_RESPONSE.
+    let mut probe = [0u8; 1];
+    match stream.peek(&mut probe).await {
+        Ok(n) if n > 0 && probe[0] == 0x16 => {
+            tracing::warn!(
+                %peer,
+                "HTTPS client on the HTTP admin port; open http:// (not https://)"
+            );
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = LineReader::new(read_half);
 
@@ -308,7 +325,7 @@ async fn read_request<R: tokio::io::AsyncRead + Unpin>(
         ReadLine::TooLong => return Ok(Err("request line too long".to_string())),
     };
     if request_line.is_empty() {
-        return Ok(Ok(None));
+        return Ok(Err("empty request line".to_string()));
     }
 
     let line = String::from_utf8_lossy(&request_line).to_string();

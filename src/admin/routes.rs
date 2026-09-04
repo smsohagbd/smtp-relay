@@ -1348,10 +1348,13 @@ mod tests {
         assert_eq!(error.status, 401);
 
         let token = state.sessions().create("admin");
-        let mut req = request("127.0.0.1:9000", None);
+        let mut req = request("203.0.113.4:9000", None);
         req.headers
             .insert("cookie".to_string(), format!("{SESSION_COOKIE}={token}"));
-        assert!(authorize(&state, &req).is_ok());
+        assert!(
+            authorize(&state, &req).is_ok(),
+            "a dashboard password is enough for remote clients after login"
+        );
     }
 
     #[test]

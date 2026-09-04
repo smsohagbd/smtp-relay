@@ -358,19 +358,19 @@ fn warn_about_exposure(state: &Arc<AppState>) {
         );
     }
 
-    if config.admin.enabled && config.admin.api_token.is_empty() {
+    if config.admin.enabled && !config.admin.remote_access_configured() {
         let loopback = config.admin.bind_address.starts_with("127.")
             || config.admin.bind_address.starts_with("[::1]");
         if loopback {
             tracing::info!(
                 bind = %config.admin.bind_address,
-                "admin API has no token: only loopback clients are accepted"
+                "admin API has no password or token: only loopback clients are accepted"
             );
         } else {
             tracing::warn!(
                 bind = %config.admin.bind_address,
-                "admin API is bound off-loopback without admin.api_token: remote requests \
-                 will be refused until a token is set"
+                "admin API is bound off-loopback without admin.password or admin.api_token: \
+                 remote requests will be refused"
             );
         }
     }
