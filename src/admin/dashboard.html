@@ -225,7 +225,8 @@
   </label>
   <span class="live"><span class="dot" id="live-dot"></span><span id="live-text">offline</span></span>
   <span class="sub" id="whoami"></span>
-  <button id="btn-refresh">Refresh</button>
+  <button id="btn-auto-refresh" title="Stop live updates while you edit">Auto-refresh: Off</button>
+  <button id="btn-refresh">Refresh now</button>
   <button id="btn-logout">Sign out</button>
 </header>
 
@@ -915,11 +916,22 @@ async function loadTab(reason) {
 }
 
 let refreshing = false;
-async function refreshAll() {
+let autoRefresh = localStorage.getItem("sr-auto-refresh") === "1";
+
+function syncAutoRefreshButton() {
+  const button = $("btn-auto-refresh");
+  button.textContent = autoRefresh ? "Auto-refresh: On" : "Auto-refresh: Off";
+  button.classList.toggle("good", autoRefresh);
+  if (!autoRefresh) setLive(false, "paused");
+  else if (stream && stream.readyState === 1) setLive(true, "live");
+}
+
+async function refreshAll(force) {
+  if (!force && !autoRefresh) return;
   if (refreshing) return;
   refreshing = true;
   try {
-    await Promise.all([loadStatus(), loadRelays(), loadTab("refresh")]);
+    await Promise.all([loadStatus(), loadRelays(), loadTab(force ? "open" : "refresh")]);
   } catch (error) {
     toast(error.message, "bad");
   } finally {
@@ -932,7 +944,7 @@ async function act(path, options, successMessage) {
   try {
     const result = await api(path, options);
     if (successMessage) toast(successMessage, "ok");
-    await refreshAll();
+    await refreshAll(true);
     return result;
   } catch (error) {
     toast(error.message, "bad");
@@ -950,7 +962,13 @@ function bulk(action, ids, message) {
 }
 
 // --- wiring -----------------------------------------------------------------
-$("btn-refresh").onclick = refreshAll;
+$("btn-refresh").onclick = () => refreshAll(true);
+$("btn-auto-refresh").onclick = () => {
+  autoRefresh = !autoRefresh;
+  localStorage.setItem("sr-auto-refresh", autoRefresh ? "1" : "0");
+  syncAutoRefreshButton();
+  toast(autoRefresh ? "Auto-refresh on" : "Auto-refresh off — form will not reload", "ok");
+};
 $("window").onchange = loadStatus;
 $("msg-status").onchange = () => { messagePage = 1; loadTab(); };
 
@@ -981,7 +999,7 @@ $("btn-probe-all").onclick = async () => {
   for (const relay of RELAYS) {
     await api("/api/relays/" + encodeURIComponent(relay.id) + "/probe", { method: "POST" }).catch(() => null);
   }
-  await refreshAll();
+  await refreshAll(true);
   toast("Health check complete", "ok");
 };
 
@@ -1227,7 +1245,7 @@ $("btn-apply-config").onclick = async () => {
   try {
     await api("/api/config", { method: "PUT", body: JSON.stringify({ config: document_ }) });
     toast("Configuration applied and saved", "ok");
-    await refreshAll();
+    await refreshAll(true);
   } catch (error) {
     $("config-error").textContent = error.message;
   }
@@ -1274,7 +1292,7 @@ $("test-send").onclick = async () => {
     toast("Test failed: " + error.message, "bad");
   } finally {
     $("test-send").disabled = false;
-    refreshAll();
+    refreshAll(true);
   }
 };
 
@@ -1294,6 +1312,7 @@ let stream = null;
 let pending = null;
 
 function scheduleRefresh() {
+  if (!autoRefresh) return;
   if (pending) return;
   pending = setTimeout(() => { pending = null; refreshAll(); }, 400);
 }
@@ -1309,9 +1328,12 @@ function connectStream() {
   const url = "/api/events" + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "");
   stream = new EventSource(url);
 
-  stream.onopen = () => setLive(true, "live");
+  stream.onopen = () => {
+    if (autoRefresh) setLive(true, "live");
+    else setLive(false, "paused");
+  };
   stream.onerror = () => {
-    setLive(false, "reconnecting…");
+    if (autoRefresh) setLive(false, "reconnecting…");
     stream.close();
     setTimeout(connectStream, 5000);
   };
@@ -1459,7 +1481,7 @@ $("btn-delete-selected").onclick = async () => {
   }
   selected.clear();
   toast("Selected providers deleted", "ok");
-  await refreshAll();
+  await refreshAll(true);
 };
 $("btn-bulk-import").onclick = () => {
   $("import-text").value = "";
@@ -1496,7 +1518,7 @@ $("import-save").onclick = async () => {
     $("import-result").style.display = "block";
     if (result.added_count) {
       toast("Added " + result.added_count + " SMTP provider(s)", "ok");
-      await refreshAll();
+      await refreshAll(true);
     }
     if (!result.failed_count) $("import-dialog").close();
   } catch (error) {
@@ -1562,7 +1584,7 @@ $("relay-form").onsubmit = async (event) => {
     });
     toast(editing ? "Provider updated" : "SMTP provider added", "ok");
     $("relay-dialog").close();
-    await refreshAll();
+    await refreshAll(true);
   } catch (error) {
     $("relay-form-error").textContent = error.message;
     toast(error.message, "bad");
@@ -1578,7 +1600,7 @@ $("relay-delete").onclick = async () => {
     await api("/api/relays/" + encodeURIComponent(id), { method: "DELETE" });
     toast("Provider deleted", "ok");
     $("relay-dialog").close();
-    await refreshAll();
+    await refreshAll(true);
   } catch (error) {
     $("relay-form-error").textContent = error.message;
   }
@@ -1598,7 +1620,8 @@ $("login-card").onsubmit = async (event) => {
     });
     $("login-pass").value = "";
     showApp(result.username);
-    await refreshAll();
+    syncAutoRefreshButton();
+    await refreshAll(true);
     connectStream();
   } catch (error) {
     $("login-error").textContent = error.message;
@@ -1624,7 +1647,8 @@ async function boot() {
       return;
     }
     showApp(session.username);
-    await refreshAll();
+    syncAutoRefreshButton();
+    await refreshAll(true);
     connectStream();
   } catch (error) {
     showLogin();
@@ -1633,7 +1657,11 @@ async function boot() {
 }
 
 boot();
-setInterval(() => { if ($("app").classList.contains("hidden")) return; if (!stream || stream.readyState !== 1) refreshAll(); }, 15000);
+setInterval(() => {
+  if (!autoRefresh || $("app").classList.contains("hidden")) return;
+  if (!stream || stream.readyState !== 1) refreshAll();
+}, 15000);
+syncAutoRefreshButton();
 window.addEventListener("resize", () => { if (STATUS) renderChart(STATUS.series); });
 </script>
 </body>
