@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::admin::http::{HandlerFuture, Reply, Request, Response};
-use crate::config::{AuthConfig, Config, RelayConfig, StickyMode, Strategy, TlsMode};
+use crate::config::{AuthConfig, Config, RelayConfig, RotationConfig, StickyMode, Strategy, TlsMode};
 use crate::events::EventKind;
 use crate::metrics::{MessageStatus, RelayMetricsRow};
 use crate::relay::health;
@@ -129,6 +129,10 @@ async fn route(state: Arc<AppState>, request: Request) -> Reply {
         ("PUT", ["api", "config"]) => replace_config(&state, &request).into(),
         ("POST", ["api", "config", "reload"]) => reload_config(&state).into(),
         ("POST", ["api", "config", "save"]) => save_config(&state).into(),
+        ("GET", ["api", "rotation"]) => rotation_get(&state).into(),
+        ("PUT", ["api", "rotation"]) => rotation_put(&state, &request).into(),
+        ("GET", ["api", "debug", "inbound"]) => inbound_debug_get(&state).into(),
+        ("PUT", ["api", "debug", "inbound"]) => inbound_debug_put(&state, &request).into(),
 
         // -- messages -------------------------------------------------------
         ("GET", ["api", "messages"]) => messages(&state, &request).into(),
@@ -407,6 +411,14 @@ fn status(state: &Arc<AppState>, request: &Request) -> Response {
                 "active": pool.active_count(),
                 "eligible": pool.eligible_count(),
                 "healthy": pool.healthy_count(),
+            },
+            "rotation": {
+                "enabled": config.rotation.enabled,
+                "templates": config.rotation.templates.len(),
+            },
+            "logging": {
+                "dump_inbound": config.logging.dump_inbound,
+                "directory": config.logging.directory.as_ref().map(|path| path.display().to_string()),
             },
             "queue": {
                 "enabled": state.queue.is_enabled(),
@@ -1358,6 +1370,54 @@ fn replace_config(state: &Arc<AppState>, request: &Request) -> Response {
     }
 }
 
+fn rotation_get(state: &Arc<AppState>) -> Response {
+    let config = state.config();
+    Response::json_value(
+        200,
+        &json!({
+            "enabled": config.rotation.enabled,
+            "templates": config.rotation.templates,
+            "writable": config.admin.allow_config_write,
+        }),
+    )
+}
+
+fn rotation_put(state: &Arc<AppState>, request: &Request) -> Response {
+    if !state.config().admin.allow_config_write {
+        return Response::error(403, "admin.allow_config_write is disabled");
+    }
+    let mut incoming: RotationConfig = match request.body_json() {
+        Ok(value) => value,
+        Err(error) => return Response::error(400, &error),
+    };
+    for (index, template) in incoming.templates.iter_mut().enumerate() {
+        if template.id.trim().is_empty() {
+            template.id = format!("t{}", index + 1);
+        }
+        template.id = template.id.trim().to_string();
+    }
+    match state.edit_config(should_persist(state, request), |config| {
+        config.rotation = incoming.clone();
+    }) {
+        Ok(_) => {
+            tracing::info!(
+                enabled = incoming.enabled,
+                templates = incoming.templates.len(),
+                "content rotation updated"
+            );
+            Response::json_value(
+                200,
+                &json!({
+                    "ok": true,
+                    "enabled": incoming.enabled,
+                    "templates": incoming.templates,
+                }),
+            )
+        }
+        Err(error) => Response::error(422, &error),
+    }
+}
+
 fn reload_config(state: &Arc<AppState>) -> Response {
     match state.reload_from_disk() {
         Ok(change) => {
@@ -1425,14 +1485,68 @@ fn messages(state: &Arc<AppState>, request: &Request) -> Response {
             "pages": pages,
             "limit": limit,
             "maillog": state.metrics.activity.maillog_path().map(|path| path.display().to_string()),
-            "messages": records,
+            "dump_inbound": state.config().logging.dump_inbound,
+            "messages": records.into_iter().map(|record| {
+                let mut value = serde_json::to_value(&record).unwrap_or_else(|_| json!({}));
+                value["has_inbound_dump"] = json!(state.has_inbound_dump(&record.id));
+                value
+            }).collect::<Vec<_>>(),
         }),
     )
 }
 
+fn inbound_debug_get(state: &Arc<AppState>) -> Response {
+    let config = state.config();
+    Response::json_value(
+        200,
+        &json!({
+            "enabled": config.logging.dump_inbound,
+            "directory": config.logging.directory.as_ref().map(|path| {
+                path.join("inbound").display().to_string()
+            }),
+            "writable": config.admin.allow_config_write,
+        }),
+    )
+}
+
+fn inbound_debug_put(state: &Arc<AppState>, request: &Request) -> Response {
+    if !state.config().admin.allow_config_write {
+        return Response::error(403, "admin.allow_config_write is disabled");
+    }
+    let body: serde_json::Value = match request.body_json() {
+        Ok(value) => value,
+        Err(error) => return Response::error(400, &error),
+    };
+    let enabled = body
+        .get("enabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    match state.edit_config(should_persist(state, request), |config| {
+        config.logging.dump_inbound = enabled;
+    }) {
+        Ok(_) => {
+            tracing::info!(enabled, "inbound MIME dump {}", if enabled { "enabled" } else { "disabled" });
+            inbound_debug_get(state)
+        }
+        Err(error) => Response::error(422, &error),
+    }
+}
+
 fn message(state: &Arc<AppState>, id: &str) -> Response {
     match state.metrics.activity.get(id) {
-        Some(record) => Response::json(200, &record),
+        Some(record) => {
+            let mut value = serde_json::to_value(&record).unwrap_or_else(|_| json!({}));
+            if let Some((raw, path)) = state.inbound_dump(id) {
+                let tracking = crate::message::rotation::extract_tracking(&raw);
+                value["inbound_raw"] = json!(String::from_utf8_lossy(&raw));
+                value["inbound_raw_bytes"] = json!(raw.len());
+                value["inbound_raw_path"] = json!(path.map(|p| p.display().to_string()));
+                value["inbound_links"] = json!(tracking.links);
+                value["inbound_pixels"] = json!(tracking.pixels);
+                value["inbound_unsubscribe"] = json!(tracking.unsubscribe);
+            }
+            Response::json_value(200, &value)
+        }
         None => Response::error(
             404,
             &format!("message `{id}` is not in the activity log (it may have aged out)"),

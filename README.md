@@ -29,7 +29,13 @@ newsletters, custom scripts. No plugin and no vendor lock-in.
   least-used, or failover)
 - Rewrites only the **From email** to the selected account  
   Display name is kept (`Jane <noreply@your-smtp.com>`)
-- Body, tracking links, images, To / Cc / Bcc are unchanged
+- Body, tracking links, images, To / Cc / Bcc stay as they arrived unless you
+  turn on **content rotation**
+- Optional **content rotation**: templates match a Mautic campaign by Subject.
+  Same-subject templates rotate round-robin; no match leaves the email unchanged.
+  Write `{{link1}}`, `{{link2}}`, `{{unsubscribe}}` — they become the original tracked links.
+  Open-tracking pixels are copied automatically. Turn on **Capture inbound MIME**
+  in Recent messages to see (and copy) the exact MIME Mautic submitted.
 - Automatic retry if a provider fails; circuit breaker skips a dead account
 - Web UI: add, clone, bulk-import, test, pause, or delete providers
 - Disk mail log like Postfix/Exim: `/var/log/smtp-relay/maillog`

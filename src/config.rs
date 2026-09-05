@@ -37,6 +37,7 @@ pub struct Config {
     pub health: HealthConfig,
     pub admin: AdminConfig,
     pub logging: LoggingConfig,
+    pub rotation: RotationConfig,
     pub relays: Vec<RelayConfig>,
 }
 
@@ -50,6 +51,7 @@ impl Default for Config {
             health: HealthConfig::default(),
             admin: AdminConfig::default(),
             logging: LoggingConfig::default(),
+            rotation: RotationConfig::default(),
             relays: Vec::new(),
         }
     }
@@ -216,6 +218,65 @@ pub struct DomainOverride {
     pub domain: String,
     /// Relays eligible for this domain, in preference order.
     pub relay_ids: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// rotation:
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RotationConfig {
+    /// When true, inbound subject/body are replaced from templates whose
+    /// `match_subject` equals the inbound Subject. Matching templates
+    /// rotate round-robin. No match means the original body is kept.
+    pub enabled: bool,
+    pub templates: Vec<ContentTemplate>,
+}
+
+impl Default for RotationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            templates: Vec::new(),
+        }
+    }
+}
+
+impl RotationConfig {
+    pub fn usable(&self) -> impl Iterator<Item = &ContentTemplate> {
+        self.templates.iter().filter(|template| template.is_usable())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContentTemplate {
+    pub id: String,
+    /// Inbound Subject that selects this template (Mautic campaign subject).
+    /// Compared after RFC 2047 decode, trim, and case-fold. Empty = never used.
+    pub match_subject: String,
+    /// Replacement Subject. Empty keeps the inbound Subject.
+    pub subject: String,
+    pub body: String,
+}
+
+impl Default for ContentTemplate {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            match_subject: String::new(),
+            subject: String::new(),
+            body: String::new(),
+        }
+    }
+}
+
+impl ContentTemplate {
+    pub fn is_usable(&self) -> bool {
+        !self.match_subject.trim().is_empty()
+            && (!self.subject.trim().is_empty() || !self.body.trim().is_empty())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +520,10 @@ pub struct LoggingConfig {
     /// Log the full rewritten header block at debug level. Verbose; useful when
     /// diagnosing SPF/DKIM alignment problems.
     pub log_headers: bool,
+    /// Capture each inbound MIME (the bytes Mautic actually submitted).
+    /// Recent dumps stay in the dashboard; if `directory` is set they are
+    /// also written as `{directory}/inbound/{id}.eml`.
+    pub dump_inbound: bool,
 }
 
 impl Default for LoggingConfig {
@@ -469,6 +534,7 @@ impl Default for LoggingConfig {
             directory: None,
             file_prefix: "smtp-relay".to_string(),
             log_headers: false,
+            dump_inbound: false,
         }
     }
 }
@@ -1021,6 +1087,19 @@ impl Config {
             if !looks_like_email(fallback) {
                 return Err(invalid(format!(
                     "rewrite.reply_to_fallback `{fallback}` is not a valid email address"
+                )));
+            }
+        }
+
+        let mut seen_templates = BTreeMap::new();
+        for (index, template) in self.rotation.templates.iter().enumerate() {
+            let id = template.id.trim();
+            if id.is_empty() {
+                continue;
+            }
+            if let Some(first) = seen_templates.insert(id.to_string(), index) {
+                return Err(invalid(format!(
+                    "duplicate rotation template id `{id}` (templates[{first}] and templates[{index}])"
                 )));
             }
         }

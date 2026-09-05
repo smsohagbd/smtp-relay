@@ -139,6 +139,11 @@
     color: var(--muted); font-size: 12px;
   }
   .pager-btns { display: flex; align-items: center; gap: 8px; }
+  .template-card {
+    border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px;
+    background: var(--bg);
+  }
+  .template-card textarea { width: 100%; min-height: 120px; }
 
   @media (max-width: 860px) {
     header, main { padding-left: 12px; padding-right: 12px; }
@@ -276,6 +281,7 @@
     <div class="tabs" id="tabs">
       <button data-tab="messages" class="active">Recent messages</button>
       <button data-tab="queue">Retry queue</button>
+      <button data-tab="rotation">Content rotation</button>
       <button data-tab="config">Configuration</button>
     </div>
 
@@ -291,6 +297,9 @@
             <option value="queued">queued</option>
             <option value="rejected">rejected</option>
           </select>
+        </label>
+        <label class="inline" title="Save the MIME Mautic actually submits so you can copy it">
+          <input type="checkbox" id="dump-inbound"> Capture inbound MIME
         </label>
         <div class="spacer"></div>
         <button class="danger" id="btn-clear-deferred">Delete deferred</button>
@@ -309,6 +318,29 @@
         <button class="danger" id="btn-purge">Purge queue</button>
       </div>
       <div id="queue-table"></div>
+    </div>
+
+    <div class="panel hidden" id="tab-rotation">
+      <div class="panel-head">
+        <strong>Content rotation</strong>
+        <label class="inline">
+          <input type="checkbox" id="rotation-enabled"> Enable (round-robin)
+        </label>
+        <div class="spacer"></div>
+        <button id="btn-add-template">Add template</button>
+        <button class="primary" id="btn-save-rotation">Save</button>
+      </div>
+      <div class="panel-body">
+        <p style="color:var(--muted);margin:0 0 12px;font-size:12.5px">
+          Each template belongs to one Mautic campaign via <strong>Match subject</strong>
+          (copy the Subject from Messages — that is the MIME Mautic sent us).
+          Matching templates rotate round-robin. No match = original email, no rotation.
+          In the body use <span class="mono">{{link1}}</span>, <span class="mono">{{link2}}</span>,
+          <span class="mono">{{unsubscribe}}</span>. Open pixels are copied automatically.
+        </p>
+        <div id="rotation-templates"></div>
+        <div class="err" id="rotation-error" style="margin-top:8px"></div>
+      </div>
     </div>
 
     <div class="panel hidden" id="tab-config">
@@ -453,7 +485,11 @@
 </dialog>
 
 <dialog id="detail-dialog">
-  <div class="panel-head"><strong id="detail-title">Details</strong></div>
+  <div class="panel-head">
+    <strong id="detail-title">Details</strong>
+    <div class="spacer"></div>
+    <button class="tiny" id="detail-copy" hidden>Copy MIME</button>
+  </div>
   <div class="panel-body"><pre class="mono" id="detail-body" style="margin:0;white-space:pre-wrap;word-break:break-word"></pre></div>
   <div class="actions"><button id="detail-close">Close</button></div>
 </dialog>
@@ -540,6 +576,8 @@ const selected = new Set();
 let currentTab = "messages";
 const MESSAGE_PAGE_SIZE = 50;
 let messagePage = 1;
+let rotationTemplates = [];
+let inboundMimeText = "";
 
 // --- overview cards ---------------------------------------------------------
 function renderCards() {
@@ -781,8 +819,10 @@ function renderMessages(payload) {
       <button ${page >= pages ? "disabled" : ""} data-page="${page + 1}">Next</button>
     </div>
   </div>`;
+  const dumpBox = $("dump-inbound");
+  if (dumpBox && payload.dump_inbound !== undefined) dumpBox.checked = !!payload.dump_inbound;
   if (!messages.length) {
-    $("messages-table").innerHTML = `<div class="empty">No messages yet.</div>${pager}`;
+    $("messages-table").innerHTML = `<div class="empty">No messages yet.${payload.dump_inbound ? " Capture is on — send from Mautic, then open MIME." : ""}</div>${pager}`;
     return;
   }
   const rows = messages.map((message) => `<tr>
@@ -795,7 +835,7 @@ function renderMessages(payload) {
     <td class="num">${message.attempts}</td>
     <td class="num">${message.latency_ms !== null && message.latency_ms !== undefined ? message.latency_ms + " ms" : "—"}</td>
     <td class="err" style="font-size:11.5px">${escapeHtml((message.error || "").slice(0, 60))}</td>
-    <td><button class="tiny" data-msg="${escapeHtml(message.id)}">Info</button></td>
+    <td><button class="tiny" data-msg="${escapeHtml(message.id)}">${message.has_inbound_dump ? "MIME" : "Info"}</button></td>
   </tr>`).join("");
 
   $("messages-table").innerHTML = `<div class="table-wrap"><table>
@@ -859,6 +899,8 @@ async function loadTab() {
     renderMessages(payload);
   } else if (currentTab === "queue") {
     renderQueue(await api("/api/queue?limit=200"));
+  } else if (currentTab === "rotation") {
+    await loadRotation();
   } else if (currentTab === "config") {
     const payload = await api("/api/config");
     $("config-json").value = JSON.stringify(payload.config, null, 2);
@@ -971,6 +1013,8 @@ $("relay-table").addEventListener("click", async (event) => {
       }
       case "detail": {
         const relay = RELAYS.find((entry) => entry.id === id);
+        inboundMimeText = "";
+        $("detail-copy").hidden = true;
         $("detail-title").textContent = "Relay " + id;
         $("detail-body").textContent = JSON.stringify(relay, null, 2);
         $("detail-dialog").showModal();
@@ -997,8 +1041,31 @@ $("messages-table").addEventListener("click", async (event) => {
   if (!button) return;
   try {
     const record = await api("/api/messages/" + encodeURIComponent(button.dataset.msg));
+    const {
+      inbound_raw: inboundRaw,
+      inbound_raw_bytes: inboundBytes,
+      inbound_raw_path: inboundPath,
+      inbound_links: inboundLinks,
+      inbound_pixels: inboundPixels,
+      inbound_unsubscribe: inboundUnsub,
+      ...rest
+    } = record;
+    inboundMimeText = inboundRaw || "";
     $("detail-title").textContent = "Message " + record.id;
-    $("detail-body").textContent = JSON.stringify(record, null, 2);
+    $("detail-copy").hidden = !inboundMimeText;
+    let text = JSON.stringify(rest, null, 2);
+    if (inboundRaw) {
+      text += "\n\n----- captured tracking -----\n";
+      text += "bytes: " + (inboundBytes || inboundRaw.length) + "\n";
+      if (inboundPath) text += "file: " + inboundPath + "\n";
+      text += "links:\n" + ((inboundLinks || []).map((url, i) => "  {{link" + (i + 1) + "}}  " + url).join("\n") || "  (none)") + "\n";
+      text += "pixels:\n" + ((inboundPixels || []).map((url) => "  " + url).join("\n") || "  (none)") + "\n";
+      if (inboundUnsub) text += "unsubscribe: " + inboundUnsub + "\n";
+      text += "\n----- inbound MIME (as Mautic sent) -----\n" + inboundRaw;
+    } else {
+      text += "\n\nNo inbound MIME dump. Turn on “Capture inbound MIME” and send again.";
+    }
+    $("detail-body").textContent = text;
     $("detail-dialog").showModal();
   } catch (error) { toast(error.message, "bad"); }
 });
@@ -1009,6 +1076,8 @@ $("queue-table").addEventListener("click", async (event) => {
     try {
       const entry = await api("/api/queue/" + encodeURIComponent(info.dataset.queueInfo));
       const { raw_preview: preview, ...rest } = entry;
+      inboundMimeText = preview || "";
+      $("detail-copy").hidden = !inboundMimeText;
       $("detail-title").textContent = "Queued message " + entry.id;
       $("detail-body").textContent = JSON.stringify(rest, null, 2) + "\n\n" + preview;
       $("detail-dialog").showModal();
@@ -1042,6 +1111,86 @@ $("btn-clear-messages").onclick = () => {
   messagePage = 1;
   act("/api/messages", { method: "DELETE" }, "Activity log cleared");
 };
+async function loadRotation() {
+  const payload = await api("/api/rotation");
+  $("rotation-enabled").checked = !!payload.enabled;
+  $("btn-save-rotation").disabled = payload.writable === false;
+  $("btn-add-template").disabled = payload.writable === false;
+  rotationTemplates = (payload.templates || []).map((template, index) => ({
+    id: template.id || ("t" + (index + 1)),
+    match_subject: template.match_subject || "",
+    subject: template.subject || "",
+    body: template.body || "",
+  }));
+  if (!rotationTemplates.length) {
+    rotationTemplates.push({ id: "t1", match_subject: "", subject: "", body: "" });
+  }
+  renderRotation();
+}
+
+function renderRotation() {
+  $("rotation-templates").innerHTML = rotationTemplates.map((template, index) => `
+    <div class="template-card" data-t="${index}">
+      <div class="grid-2">
+        <div class="row"><span>Id</span><input type="text" data-field="id" value="${escapeHtml(template.id)}"></div>
+        <div class="row"><span>Match subject</span><input type="text" data-field="match_subject" value="${escapeHtml(template.match_subject)}" placeholder="exact Mautic Subject"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span>Rotated subject (empty = keep original)</span>
+        <input type="text" data-field="subject" value="${escapeHtml(template.subject)}" placeholder="new subject for this variant">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span>Body (HTML) — {{link1}}, {{link2}}, {{unsubscribe}} keep the original tracked URLs</span>
+        <textarea data-field="body" spellcheck="false">${escapeHtml(template.body)}</textarea>
+      </div>
+      <div class="actions" style="border:0;padding:8px 0 0">
+        <div class="spacer"></div>
+        <button class="tiny danger" data-remove-template="${index}">Remove</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+function collectRotation() {
+  return {
+    enabled: $("rotation-enabled").checked,
+    templates: Array.from($("rotation-templates").querySelectorAll(".template-card")).map((card) => ({
+      id: card.querySelector("[data-field=id]").value.trim(),
+      match_subject: card.querySelector("[data-field=match_subject]").value,
+      subject: card.querySelector("[data-field=subject]").value,
+      body: card.querySelector("[data-field=body]").value,
+    })),
+  };
+}
+
+$("btn-add-template").onclick = () => {
+  const current = collectRotation();
+  rotationTemplates = current.templates;
+  rotationTemplates.push({ id: "t" + (rotationTemplates.length + 1), match_subject: "", subject: "", body: "" });
+  renderRotation();
+};
+
+$("rotation-templates").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-remove-template]");
+  if (!button) return;
+  const current = collectRotation();
+  current.templates.splice(Number(button.dataset.removeTemplate), 1);
+  rotationTemplates = current.templates.length ? current.templates : [{ id: "t1", match_subject: "", subject: "", body: "" }];
+  renderRotation();
+});
+
+$("btn-save-rotation").onclick = async () => {
+  $("rotation-error").textContent = "";
+  try {
+    await api("/api/rotation", { method: "PUT", body: JSON.stringify(collectRotation()) });
+    toast("Content rotation saved", "ok");
+    await loadRotation();
+  } catch (error) {
+    $("rotation-error").textContent = error.message;
+    toast(error.message, "bad");
+  }
+};
+
 $("btn-reload-config").onclick = () => act("/api/config/reload", { method: "POST" }, "Configuration reloaded");
 $("btn-save-config").onclick = () => act("/api/config/save", { method: "POST" }, "Configuration written");
 
@@ -1065,6 +1214,25 @@ $("btn-apply-config").onclick = async () => {
 
 $("test-cancel").onclick = () => $("test-dialog").close();
 $("detail-close").onclick = () => $("detail-dialog").close();
+$("detail-copy").onclick = async () => {
+  if (!inboundMimeText) return;
+  try {
+    await navigator.clipboard.writeText(inboundMimeText);
+    toast("Inbound MIME copied", "ok");
+  } catch (_) {
+    toast("Could not copy — select the MIME block manually", "bad");
+  }
+};
+$("dump-inbound").onchange = async () => {
+  const enabled = $("dump-inbound").checked;
+  try {
+    await api("/api/debug/inbound", { method: "PUT", body: JSON.stringify({ enabled }) });
+    toast(enabled ? "Capture on — send from Mautic, then click MIME" : "Inbound MIME capture off", "ok");
+  } catch (error) {
+    $("dump-inbound").checked = !enabled;
+    toast(error.message, "bad");
+  }
+};
 $("test-send").onclick = async () => {
   const relay = $("test-relay").value;
   const to = $("test-to").value.trim();
@@ -1094,7 +1262,7 @@ $("tabs").addEventListener("click", (event) => {
   if (!button) return;
   currentTab = button.dataset.tab;
   for (const tab of $("tabs").querySelectorAll("button")) tab.classList.toggle("active", tab === button);
-  for (const name of ["messages", "queue", "config"]) $("tab-" + name).classList.toggle("hidden", name !== currentTab);
+  for (const name of ["messages", "queue", "rotation", "config"]) $("tab-" + name).classList.toggle("hidden", name !== currentTab);
   loadTab().catch((error) => toast(error.message, "bad"));
 });
 

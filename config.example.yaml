@@ -144,6 +144,27 @@ rewrite:
   #   - name: "List-Unsubscribe-Post"
   #     value: "List-Unsubscribe=One-Click"
 
+# Swap subject/body while keeping the inbound message's tracked links.
+# A template is used only when match_subject equals the inbound Subject
+# (Mautic campaign subject, case-insensitive). No match = no rotation.
+# Off until you enable it in the dashboard (Content rotation tab).
+rotation:
+  enabled: false
+  templates: []
+  # templates:
+  #   - id: "email1-a"
+  #     match_subject: "Email 1"
+  #     subject: "A new daily ritual"
+  #     body: "<p>New wording.</p><p><a href=\"{{link1}}\">Read more</a> · <a href=\"{{unsubscribe}}\">Unsubscribe</a></p>"
+  #   - id: "email1-b"
+  #     match_subject: "Email 1"
+  #     subject: "Feel good, stay you"
+  #     body: "<p>Different wording.</p><p><a href=\"{{link1}}\">Read more</a> · <a href=\"{{unsubscribe}}\">Unsubscribe</a></p>"
+  #   - id: "email2-a"
+  #     match_subject: "Email 2"
+  #     subject: "Tonight only"
+  #     body: "<p>Another campaign.</p><p><a href=\"{{link1}}\">Open</a></p>"
+
 queue:
   enabled: true
 
@@ -238,6 +259,10 @@ logging:
   # Log the full rewritten header block at debug level. Verbose, but the
   # fastest way to diagnose an SPF/DKIM alignment problem.
   log_headers: false
+
+  # When true, keep the inbound MIME Mautic sent (dashboard message → MIME,
+  # and `{directory}/inbound/{id}.eml`). Turn off after debugging.
+  dump_inbound: false
 
 # ---------------------------------------------------------------------------
 # relays:

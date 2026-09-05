@@ -121,6 +121,10 @@ impl Message {
         &self.body
     }
 
+    pub fn set_body(&mut self, body: Vec<u8>) {
+        self.body = body;
+    }
+
     pub fn get(&self, name: &str) -> Option<&Header> {
         let needle = name.to_ascii_lowercase();
         self.headers.iter().find(|h| h.lower == needle)

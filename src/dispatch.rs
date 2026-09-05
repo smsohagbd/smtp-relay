@@ -92,6 +92,9 @@ pub async fn submit(state: &Arc<AppState>, inbound: InboundMessage) -> SubmitOut
     record.subject = subject.clone();
     record.size_bytes = size;
     record.client_ip = inbound.client_ip.map(|ip| ip.to_string());
+    if config.logging.dump_inbound {
+        state.remember_inbound(&inbound.id, &inbound.raw);
+    }
     state.metrics.activity.push(record);
 
     let mut message = QueuedMessage {
@@ -270,6 +273,10 @@ pub async fn attempt_delivery(
         let _slot = relay.begin_delivery();
 
         let rewritten = {
+            let inbound_subject = headers::peek(&message.raw, "subject")
+                .map(|value| crate::message::decode_encoded_words(&value))
+                .unwrap_or_default();
+            let rotation = state.next_rotation_template(&inbound_subject);
             let context = RewriteContext {
                 rewrite: &config.rewrite,
                 relay: &relay.config,
@@ -278,9 +285,17 @@ pub async fn attempt_delivery(
                 client_ip: message.client_ip,
                 client_helo: &message.helo,
                 original_sender: &message.sender,
+                rotation: rotation.as_ref(),
             };
             match rewrite(&message.raw, &context) {
-                Ok(rewritten) => rewritten,
+                Ok(mut rewritten) => {
+                    if config.rotation.enabled && rotation.is_none() {
+                        rewritten.notes.push(format!(
+                            "content rotation skipped: no template matched subject `{inbound_subject}`"
+                        ));
+                    }
+                    rewritten
+                }
                 Err(error) => {
                     relay.release_quota();
                     state.metrics.inc(&state.metrics.counters.rewrite_errors);

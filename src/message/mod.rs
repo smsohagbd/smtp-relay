@@ -2,6 +2,7 @@
 
 pub mod headers;
 pub mod rewrite;
+pub mod rotation;
 
 pub use headers::parse_mailbox;
 

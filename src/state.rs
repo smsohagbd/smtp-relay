@@ -5,7 +5,7 @@
 //! the generation they started with. Readers clone the `Arc` and release the
 //! lock immediately, so no guard is ever held across an `.await`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -37,6 +37,14 @@ pub struct AppState {
     shutting_down: AtomicBool,
     sessions: SessionStore,
     lockout: AuthGuard,
+    rotation_cursors: Mutex<HashMap<String, u64>>,
+    inbound_dumps: Mutex<VecDeque<InboundDump>>,
+}
+
+struct InboundDump {
+    id: String,
+    raw: Vec<u8>,
+    path: Option<PathBuf>,
 }
 
 impl AppState {
@@ -61,6 +69,8 @@ impl AppState {
             shutting_down: AtomicBool::new(false),
             sessions: SessionStore::new(),
             lockout: AuthGuard::new(),
+            rotation_cursors: Mutex::new(HashMap::new()),
+            inbound_dumps: Mutex::new(VecDeque::new()),
         }))
     }
 
@@ -70,6 +80,88 @@ impl AppState {
 
     pub fn lockout(&self) -> &AuthGuard {
         &self.lockout
+    }
+
+    /// Next template whose `match_subject` equals the inbound Subject.
+    /// No match → `None` (original body is kept). Round-robin is per subject.
+    pub fn next_rotation_template(&self, inbound_subject: &str) -> Option<crate::config::ContentTemplate> {
+        let config = self.config();
+        if !config.rotation.enabled {
+            return None;
+        }
+        let matching: Vec<_> = config
+            .rotation
+            .usable()
+            .filter(|template| crate::message::rotation::template_matches(template, inbound_subject))
+            .cloned()
+            .collect();
+        if matching.is_empty() {
+            return None;
+        }
+        let key = crate::message::rotation::normalize_subject(inbound_subject);
+        let mut cursors = self
+            .rotation_cursors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cursor = cursors.entry(key).or_insert(0);
+        let index = (*cursor as usize) % matching.len();
+        *cursor = cursor.saturating_add(1);
+        Some(matching[index].clone())
+    }
+
+    const INBOUND_DUMP_KEEP: usize = 40;
+    const INBOUND_DUMP_BYTES: usize = 2 * 1024 * 1024;
+
+    /// Stores the MIME the submitting client actually sent (Mautic → DATA).
+    pub fn remember_inbound(&self, id: &str, raw: &[u8]) {
+        let limit = raw.len().min(Self::INBOUND_DUMP_BYTES);
+        let stored = raw[..limit].to_vec();
+        let path = self.config().logging.directory.as_ref().and_then(|directory| {
+            write_inbound_dump(directory, id, &stored)
+        });
+        if let Some(path) = path.as_ref() {
+            tracing::info!(
+                id,
+                bytes = stored.len(),
+                path = %path.display(),
+                "inbound MIME dumped"
+            );
+        } else {
+            tracing::info!(id, bytes = stored.len(), "inbound MIME captured (memory only)");
+        }
+        let mut dumps = self
+            .inbound_dumps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        dumps.retain(|existing| existing.id != id);
+        if dumps.len() >= Self::INBOUND_DUMP_KEEP {
+            dumps.pop_front();
+        }
+        dumps.push_back(InboundDump {
+            id: id.to_string(),
+            raw: stored,
+            path,
+        });
+    }
+
+    pub fn inbound_dump(&self, id: &str) -> Option<(Vec<u8>, Option<PathBuf>)> {
+        let dumps = self
+            .inbound_dumps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        dumps
+            .iter()
+            .rev()
+            .find(|dump| dump.id == id)
+            .map(|dump| (dump.raw.clone(), dump.path.clone()))
+    }
+
+    pub fn has_inbound_dump(&self, id: &str) -> bool {
+        let dumps = self
+            .inbound_dumps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        dumps.iter().any(|dump| dump.id == id)
     }
 
     /// Current configuration generation.
@@ -219,6 +311,24 @@ impl AppState {
         self.events
             .publish(EventKind::Notice, json!({ "text": "shutting down" }));
     }
+}
+
+fn write_inbound_dump(directory: &PathBuf, id: &str, raw: &[u8]) -> Option<PathBuf> {
+    let folder = directory.join("inbound");
+    if let Err(error) = std::fs::create_dir_all(&folder) {
+        tracing::warn!(%error, path = %folder.display(), "could not create inbound dump directory");
+        return None;
+    }
+    let safe: String = id
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
+        .collect();
+    let path = folder.join(format!("{safe}.eml"));
+    if let Err(error) = std::fs::write(&path, raw) {
+        tracing::warn!(%error, path = %path.display(), "could not write inbound MIME dump");
+        return None;
+    }
+    Some(path)
 }
 
 impl std::fmt::Debug for AppState {
@@ -372,7 +482,7 @@ fn queue_settings_equal(left: &Config, right: &Config) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{RelayConfig, RoutingConfig, Strategy};
+    use crate::config::{ContentTemplate, RelayConfig, RotationConfig, RoutingConfig, Strategy};
 
     fn relay(id: &str) -> RelayConfig {
         RelayConfig {
@@ -518,5 +628,67 @@ mod tests {
         assert!(state.is_shutting_down());
         receiver.changed().await.unwrap();
         assert!(*receiver.borrow());
+    }
+
+    fn template(id: &str, match_subject: &str) -> ContentTemplate {
+        ContentTemplate {
+            id: id.to_string(),
+            match_subject: match_subject.to_string(),
+            subject: format!("rotated {id}"),
+            body: "<p>{{link1}}</p>".to_string(),
+        }
+    }
+
+    #[test]
+    fn rotation_picks_only_templates_for_that_subject() {
+        let state = state_with(vec![relay("a")]);
+        state
+            .edit_config(false, |config| {
+                config.rotation = RotationConfig {
+                    enabled: true,
+                    templates: vec![
+                        template("e1a", "Email 1"),
+                        template("e1b", "Email 1"),
+                        template("e2a", "Email 2"),
+                    ],
+                };
+            })
+            .unwrap();
+
+        let first = state.next_rotation_template("Email 1").unwrap();
+        let second = state.next_rotation_template("Email 1").unwrap();
+        let third = state.next_rotation_template("Email 1").unwrap();
+        assert_eq!(first.id, "e1a");
+        assert_eq!(second.id, "e1b");
+        assert_eq!(third.id, "e1a");
+        assert_eq!(state.next_rotation_template("Email 2").unwrap().id, "e2a");
+        assert!(state.next_rotation_template("Email 3").is_none());
+    }
+
+    #[test]
+    fn inbound_dump_keeps_the_bytes_mautic_would_submit() {
+        let state = state_with(vec![relay("a")]);
+        let raw = b"Subject: Email 1\r\n\r\n<p><a href=\"https://track.example/r/1\">go</a></p>";
+        state.remember_inbound("abc123", raw);
+        let (stored, path) = state.inbound_dump("abc123").expect("dump present");
+        assert_eq!(stored, raw);
+        assert!(path.is_none());
+        assert!(state.has_inbound_dump("abc123"));
+        assert!(!state.has_inbound_dump("missing"));
+    }
+
+    #[test]
+    fn rotation_off_or_blank_match_does_nothing() {
+        let state = state_with(vec![relay("a")]);
+        assert!(state.next_rotation_template("Email 1").is_none());
+        state
+            .edit_config(false, |config| {
+                config.rotation = RotationConfig {
+                    enabled: true,
+                    templates: vec![template("orphan", "")],
+                };
+            })
+            .unwrap();
+        assert!(state.next_rotation_template("Email 1").is_none());
     }
 }

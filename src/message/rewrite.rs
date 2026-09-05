@@ -13,7 +13,7 @@
 
 use std::net::IpAddr;
 
-use crate::config::{RelayConfig, RewriteConfig};
+use crate::config::{ContentTemplate, RelayConfig, RewriteConfig};
 use crate::error::MessageError;
 use crate::message::headers::{parse_mailbox, Mailbox, Message};
 use crate::util::{format_mailbox, looks_like_email, rfc5322_date_now};
@@ -41,6 +41,9 @@ pub struct RewriteContext<'a> {
     pub client_helo: &'a str,
     /// Envelope sender the client used in `MAIL FROM`.
     pub original_sender: &'a str,
+    /// When set, subject/body are replaced from this template. Tracked
+    /// links from the inbound message fill `{{link1}}`, `{{link2}}`, …
+    pub rotation: Option<&'a ContentTemplate>,
 }
 
 /// Result of a rewrite pass: the bytes to transmit plus everything the
@@ -265,6 +268,10 @@ pub fn rewrite(raw: &[u8], ctx: &RewriteContext<'_>) -> Result<Rewritten, Messag
         );
     }
 
+    if let Some(template) = ctx.rotation {
+        super::rotation::apply_template(&mut message, raw, template, &mut notes);
+    }
+
     let subject = message
         .value("subject")
         .map(|value| super::decode_encoded_words(&value));
@@ -308,6 +315,7 @@ mod tests {
             client_ip: Some("10.1.2.3".parse().unwrap()),
             client_helo: "mautic.local",
             original_sender: "campaigns@acme-mautic.io",
+            rotation: None,
         }
     }
 
