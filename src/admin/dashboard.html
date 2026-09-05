@@ -905,7 +905,7 @@ async function loadTab(reason) {
   } else if (currentTab === "queue") {
     renderQueue(await api("/api/queue?limit=200"));
   } else if (currentTab === "rotation") {
-    if (reason === "refresh" && rotationDrawn) return;
+    if (rotationDrawn) return;
     await loadRotation();
   } else if (currentTab === "config") {
     if (reason === "refresh" && document.activeElement === $("config-json")) return;
@@ -931,7 +931,9 @@ async function refreshAll(force) {
   if (refreshing) return;
   refreshing = true;
   try {
-    await Promise.all([loadStatus(), loadRelays(), loadTab(force ? "open" : "refresh")]);
+    const jobs = [loadStatus(), loadRelays()];
+    if (currentTab !== "rotation") jobs.push(loadTab("refresh"));
+    await Promise.all(jobs);
   } catch (error) {
     toast(error.message, "bad");
   } finally {
@@ -1148,9 +1150,7 @@ function rotationFormIsActive() {
 }
 
 async function loadRotation() {
-  if (rotationFormIsActive()) return;
   const payload = await api("/api/rotation");
-  if (rotationFormIsActive()) return;
   $("rotation-enabled").checked = !!payload.enabled;
   $("btn-save-rotation").disabled = payload.writable === false;
   $("btn-add-template").disabled = payload.writable === false;
@@ -1223,6 +1223,7 @@ $("btn-save-rotation").onclick = async () => {
   try {
     await api("/api/rotation", { method: "PUT", body: JSON.stringify(collectRotation()) });
     toast("Content rotation saved", "ok");
+    rotationDrawn = false;
     await loadRotation();
   } catch (error) {
     $("rotation-error").textContent = error.message;
