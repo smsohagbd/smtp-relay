@@ -335,8 +335,10 @@
           Each template belongs to one Mautic campaign via <strong>Match subject</strong>
           (copy the Subject from Messages — that is the MIME Mautic sent us).
           Matching templates rotate round-robin. No match = original email, no rotation.
-          In the body use <span class="mono">{{link1}}</span>, <span class="mono">{{link2}}</span>,
-          <span class="mono">{{unsubscribe}}</span>. Open pixels are copied automatically.
+          Only <strong>subject</strong> and <strong>body</strong> change — other headers stay.
+          Put <span class="mono">{{link1}}</span> / <span class="mono">{{link2}}</span> only where you want
+          those clicks; unused links are skipped. Unsubscribe and the open pixel are copied
+          from Mautic automatically (you do not have to add them).
         </p>
         <div id="rotation-templates"></div>
         <div class="err" id="rotation-error" style="margin-top:8px"></div>
@@ -1045,9 +1047,12 @@ $("messages-table").addEventListener("click", async (event) => {
       inbound_raw: inboundRaw,
       inbound_raw_bytes: inboundBytes,
       inbound_raw_path: inboundPath,
+      inbound_html: inboundHtml,
+      inbound_text: inboundText,
       inbound_links: inboundLinks,
       inbound_pixels: inboundPixels,
       inbound_unsubscribe: inboundUnsub,
+      inbound_view: inboundView,
       ...rest
     } = record;
     inboundMimeText = inboundRaw || "";
@@ -1058,10 +1063,13 @@ $("messages-table").addEventListener("click", async (event) => {
       text += "\n\n----- captured tracking -----\n";
       text += "bytes: " + (inboundBytes || inboundRaw.length) + "\n";
       if (inboundPath) text += "file: " + inboundPath + "\n";
-      text += "links:\n" + ((inboundLinks || []).map((url, i) => "  {{link" + (i + 1) + "}}  " + url).join("\n") || "  (none)") + "\n";
+      if (inboundView) text += "{{view}}  " + inboundView + "\n";
+      text += "clicks:\n" + ((inboundLinks || []).map((url, i) => "  {{link" + (i + 1) + "}}  " + url).join("\n") || "  (none)") + "\n";
+      if (inboundUnsub) text += "{{unsubscribe}}  " + inboundUnsub + "\n";
       text += "pixels:\n" + ((inboundPixels || []).map((url) => "  " + url).join("\n") || "  (none)") + "\n";
-      if (inboundUnsub) text += "unsubscribe: " + inboundUnsub + "\n";
-      text += "\n----- inbound MIME (as Mautic sent) -----\n" + inboundRaw;
+      if (inboundHtml) text += "\n----- decoded HTML (quoted-printable undone) -----\n" + inboundHtml + "\n";
+      if (inboundText) text += "\n----- decoded text -----\n" + inboundText + "\n";
+      text += "\n----- inbound MIME (as Mautic sent, still encoded) -----\n" + inboundRaw;
     } else {
       text += "\n\nNo inbound MIME dump. Turn on “Capture inbound MIME” and send again.";
     }
@@ -1140,7 +1148,7 @@ function renderRotation() {
         <input type="text" data-field="subject" value="${escapeHtml(template.subject)}" placeholder="new subject for this variant">
       </div>
       <div class="row" style="margin-top:8px">
-        <span>Body (HTML) — {{link1}}, {{link2}}, {{unsubscribe}} keep the original tracked URLs</span>
+        <span>Body (HTML) — {{link1}}, {{link2}} optional. Unsubscribe + pixel are added from Mautic.</span>
         <textarea data-field="body" spellcheck="false">${escapeHtml(template.body)}</textarea>
       </div>
       <div class="actions" style="border:0;padding:8px 0 0">

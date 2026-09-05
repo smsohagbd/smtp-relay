@@ -1,8 +1,12 @@
 //! Content rotation: swap subject/body while keeping inbound tracking links.
 //!
-//! The inbound HTML is scanned in document order. The first `<a href>` becomes
-//! `{{link1}}`, the second `{{link2}}`, and so on. Open-tracking pixels are
-//! copied onto the new HTML so opens still count.
+//! Mautic "View in browser" and unsubscribe are not numbered with the CTAs.
+//! Unique click trackers (`/r/…` and other http hrefs) become `{{link1}}`,
+//! `{{link2}}`, …  `{{view}}` and `{{unsubscribe}}` fill the special slots.
+//! Unsubscribe is always copied from the inbound Mautic message (header or
+//! body). If the new template already has an unsub link, its href is rewritten;
+//! otherwise a footer link is appended. Unused `{{linkN}}` slots are left out.
+//! Open-tracking pixels are copied onto the new HTML. List-Unsubscribe stays.
 
 use crate::config::ContentTemplate;
 use crate::message::headers::Message;
@@ -13,9 +17,11 @@ const PLACEHOLDER: &str = "{{link";
 /// Tracking extracted from the inbound message.
 #[derive(Debug, Clone, Default)]
 pub struct ExtractedTracking {
+    /// Unique click destinations in document order (not view / unsubscribe).
     pub links: Vec<String>,
     pub pixels: Vec<String>,
     pub unsubscribe: Option<String>,
+    pub view: Option<String>,
 }
 
 /// Applies one template to an already-parsed message. Headers other than
@@ -33,7 +39,10 @@ pub fn apply_template(
         template.body.clone()
     };
     html = replace_placeholders(&html, &tracking);
+    html = rewrite_special_hrefs(&html, &tracking);
+    html = ensure_unsubscribe(&html, &tracking, &original_unsub_label(&extract_html(original_raw).unwrap_or_default()));
     html = inject_pixels(&html, &tracking.pixels);
+    html = strip_unused_placeholders(&html);
 
     if !template.subject.trim().is_empty() {
         let subject = replace_placeholders(template.subject.trim(), &tracking);
@@ -63,26 +72,70 @@ pub fn apply_template(
     ));
 }
 
+/// Decoded `text/html` and `text/plain` parts (quoted-printable / base64 undone).
+pub fn decoded_bodies(raw: &[u8]) -> (Option<String>, Option<String>) {
+    (extract_html(raw), extract_text(raw))
+}
+
 pub fn extract_tracking(raw: &[u8]) -> ExtractedTracking {
     let html = extract_html(raw).unwrap_or_default();
-    let mut links = extract_hrefs(&html);
-    if links.is_empty() {
+    let mut hrefs = extract_hrefs(&html);
+    if hrefs.is_empty() {
         if let Some(text) = extract_text(raw) {
-            links = extract_bare_urls(&text);
+            hrefs = extract_bare_urls(&text);
+        }
+    }
+    let mut links = Vec::new();
+    let mut view = None;
+    let mut body_unsub = None;
+    for url in hrefs {
+        match classify_url(&url) {
+            UrlKind::View if view.is_none() => view = Some(url),
+            UrlKind::Unsubscribe if body_unsub.is_none() => body_unsub = Some(url),
+            UrlKind::Click => {
+                if !links.iter().any(|existing| existing == &url) {
+                    links.push(url);
+                }
+            }
+            _ => {}
         }
     }
     let pixels = extract_pixels(&html);
-    let unsubscribe = extract_unsubscribe(raw);
-    if let Some(url) = unsubscribe.as_ref() {
-        if !links.iter().any(|existing| existing == url) {
-            links.push(url.clone());
-        }
-    }
+    let unsubscribe = extract_unsubscribe(raw).or(body_unsub);
     ExtractedTracking {
         links,
         pixels,
         unsubscribe,
+        view,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UrlKind {
+    View,
+    Unsubscribe,
+    Click,
+}
+
+fn classify_url(url: &str) -> UrlKind {
+    let path = url_path(url);
+    if path.contains("/email/unsubscribe") || path.contains("/unsubscribe") {
+        UrlKind::Unsubscribe
+    } else if path.contains("/email/view") {
+        UrlKind::View
+    } else {
+        UrlKind::Click
+    }
+}
+
+fn url_path(url: &str) -> String {
+    let lower = url.trim().to_ascii_lowercase();
+    let after_scheme = lower
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(&lower);
+    let after_host = after_scheme.split_once('/').map(|(_, path)| path).unwrap_or("");
+    format!("/{after_host}")
 }
 
 /// True when this template is meant for the inbound Subject.
@@ -126,20 +179,17 @@ fn list_unsubscribe_https(value: &str) -> Option<String> {
 fn extract_html(raw: &[u8]) -> Option<String> {
     let message = Message::parse(raw).ok()?;
     let content_type = message.value("content-type").unwrap_or_default();
-    if content_type.to_ascii_lowercase().contains("multipart") {
-        if let Some(boundary) = content_type_param(&content_type, "boundary") {
-            for part in split_multipart(message.body(), &boundary) {
-                if part_is(&part, "text/html") {
-                    return Some(decode_part_body(&part));
-                }
-            }
-        }
+    if let Some(html) = part_from_multipart(message.body(), &content_type, "text/html") {
+        return Some(html);
     }
     if content_type.to_ascii_lowercase().contains("text/html") {
         return Some(decode_body(message.body(), &message.value("content-transfer-encoding").unwrap_or_default()));
     }
     let lossy = String::from_utf8_lossy(message.body());
-    if lossy.contains("<html") || lossy.contains("<a ") || lossy.contains("<img") {
+    if lossy.contains("<html") || lossy.contains("<a ") || lossy.contains("<img") || lossy.contains("<p>") {
+        if lossy.contains("=3D") || lossy.contains("=\r\n") {
+            return Some(decode_body(lossy.as_bytes(), "quoted-printable"));
+        }
         return Some(lossy.into_owned());
     }
     None
@@ -148,20 +198,48 @@ fn extract_html(raw: &[u8]) -> Option<String> {
 fn extract_text(raw: &[u8]) -> Option<String> {
     let message = Message::parse(raw).ok()?;
     let content_type = message.value("content-type").unwrap_or_default();
-    if content_type.to_ascii_lowercase().contains("multipart") {
-        if let Some(boundary) = content_type_param(&content_type, "boundary") {
-            for part in split_multipart(message.body(), &boundary) {
-                if part_is(&part, "text/plain") {
-                    return Some(decode_part_body(&part));
-                }
-            }
-        }
+    if let Some(text) = part_from_multipart(message.body(), &content_type, "text/plain") {
+        return Some(text);
     }
     if content_type.to_ascii_lowercase().contains("text/plain") {
         return Some(decode_body(
             message.body(),
             &message.value("content-transfer-encoding").unwrap_or_default(),
         ));
+    }
+    None
+}
+
+fn part_from_multipart(body: &[u8], content_type: &str, mime: &str) -> Option<String> {
+    if !content_type.to_ascii_lowercase().contains("multipart") && sniff_boundary(body).is_none()
+    {
+        return None;
+    }
+    let boundary = content_type_param(content_type, "boundary").or_else(|| sniff_boundary(body))?;
+    for part in split_multipart(body, &boundary) {
+        if part_is(&part, mime) {
+            return Some(decode_part_body(&part));
+        }
+    }
+    None
+}
+
+/// Swift often folds `Content-Type` so `boundary=` sits on the next line.
+/// If the unfolded header missed it, take the first `--marker` in the body.
+fn sniff_boundary(body: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(body);
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("--") else {
+            continue;
+        };
+        if rest.is_empty() {
+            continue;
+        }
+        let rest = rest.strip_suffix("--").unwrap_or(rest).trim();
+        if !rest.is_empty() {
+            return Some(rest.to_string());
+        }
     }
     None
 }
@@ -389,6 +467,59 @@ pub fn replace_placeholders(input: &str, tracking: &ExtractedTracking) -> String
             out = replace_ci(&out, token, url);
         }
     }
+    if let Some(url) = tracking.view.as_deref() {
+        for token in ["{{view}}", "{{VIEW}}", "{{ view }}", "{{webview}}", "{{browser}}"] {
+            out = replace_ci(&out, token, url);
+        }
+    }
+    out
+}
+
+/// If the template already has a view-in-browser or unsubscribe `<a href>`,
+/// point it at the inbound tracked URL (placeholders are not required).
+fn rewrite_special_hrefs(html: &str, tracking: &ExtractedTracking) -> String {
+    let mut out = html.to_string();
+    if let Some(url) = tracking.unsubscribe.as_deref() {
+        out = rewrite_hrefs_of_kind(&out, UrlKind::Unsubscribe, url);
+    }
+    if let Some(url) = tracking.view.as_deref() {
+        out = rewrite_hrefs_of_kind(&out, UrlKind::View, url);
+    }
+    out
+}
+
+fn rewrite_hrefs_of_kind(html: &str, kind: UrlKind, replacement: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let lower = html.to_ascii_lowercase();
+    let mut last = 0;
+    let mut search = 0;
+    while let Some(rel) = lower[search..].find("href") {
+        let after = search + rel + 4;
+        let Some(eq) = html[after..].find('=') else {
+            search = after;
+            continue;
+        };
+        let value_at = after + eq + 1;
+        let padded = html[value_at..].trim_start();
+        let start = value_at + (html[value_at..].len() - padded.len());
+        let url = if let Some(quoted) = padded.strip_prefix('"') {
+            quoted.split('"').next().unwrap_or("")
+        } else if let Some(quoted) = padded.strip_prefix('\'') {
+            quoted.split('\'').next().unwrap_or("")
+        } else {
+            search = after;
+            continue;
+        };
+        let url_start = start + 1;
+        search = url_start + url.len();
+        if url.starts_with("{{") || url == replacement || classify_url(url) != kind {
+            continue;
+        }
+        out.push_str(&html[last..url_start]);
+        out.push_str(replacement);
+        last = url_start + url.len();
+    }
+    out.push_str(&html[last..]);
     out
 }
 
@@ -408,6 +539,91 @@ pub fn replace_link_placeholders(input: &str, links: &[String]) -> String {
         }
     }
     out
+}
+
+fn html_has_unsubscribe(html: &str, url: &str) -> bool {
+    html.contains(url)
+        || extract_hrefs(html)
+            .iter()
+            .any(|href| classify_url(href) == UrlKind::Unsubscribe)
+}
+
+fn original_unsub_label(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut search = 0;
+    while let Some(rel) = lower[search..].find("<a") {
+        let start = search + rel;
+        let close = lower[start..].find("</a>").map(|i| start + i);
+        let tag_end = lower[start..].find('>').map(|i| start + i + 1).unwrap_or(html.len());
+        search = tag_end;
+        let href = attr(&html[start..tag_end.min(html.len())], "href").unwrap_or_default();
+        if classify_url(&href) != UrlKind::Unsubscribe {
+            continue;
+        }
+        if let Some(close) = close {
+            let label = html_to_text(&html[tag_end.min(html.len())..close]);
+            if !label.is_empty() {
+                return label;
+            }
+        }
+    }
+    "Unsubscribe".to_string()
+}
+
+/// Always keep Mautic's unsubscribe in the rotated body.
+fn ensure_unsubscribe(html: &str, tracking: &ExtractedTracking, label: &str) -> String {
+    let Some(url) = tracking.unsubscribe.as_deref() else {
+        return html.to_string();
+    };
+    if html_has_unsubscribe(html, url) {
+        return html.to_string();
+    }
+    insert_before_close_body(
+        html,
+        &format!(
+            "<p style=\"margin:16px 0;font-size:12px;text-align:center\"><a href=\"{url}\">{label}</a></p>"
+        ),
+    )
+}
+
+fn strip_unused_placeholders(html: &str) -> String {
+    let mut out = html.to_string();
+    for token in [
+        "{{view}}",
+        "{{VIEW}}",
+        "{{ view }}",
+        "{{webview}}",
+        "{{browser}}",
+        "{{unsubscribe}}",
+        "{{UNSUBSCRIBE}}",
+        "{{ unsubscribe }}",
+        "{{pixel}}",
+        "{{PIXEL}}",
+    ] {
+        out = replace_ci(&out, token, "");
+    }
+    for n in 1..=20 {
+        for token in [
+            format!("{{{{link{n}}}}}"),
+            format!("{{{{LINK{n}}}}}"),
+            format!("{{{{ link{n} }}}}"),
+        ] {
+            out = out.replace(&token, "");
+        }
+    }
+    out
+}
+
+fn insert_before_close_body(html: &str, snippet: &str) -> String {
+    if let Some(index) = html.to_ascii_lowercase().rfind("</body>") {
+        let mut out = String::with_capacity(html.len() + snippet.len());
+        out.push_str(&html[..index]);
+        out.push_str(snippet);
+        out.push_str(&html[index..]);
+        out
+    } else {
+        format!("{html}{snippet}")
+    }
 }
 
 fn inject_pixels(html: &str, pixels: &[String]) -> String {
@@ -618,7 +834,7 @@ Content-Transfer-Encoding: quoted-printable\r\n\
             tracking.unsubscribe.as_deref(),
             Some("https://email.superfeelsapp.com/email/unsubscribe/6a9c507c931f3225956447")
         );
-        assert_eq!(tracking.links[1], tracking.unsubscribe.clone().unwrap());
+        assert_eq!(tracking.links.len(), 1);
         assert!(tracking.pixels.iter().any(|src| src.ends_with("6a9c507c931f3225956447.gif")));
 
         let template = ContentTemplate {
@@ -656,5 +872,152 @@ Content-Transfer-Encoding: quoted-printable\r\n\
             ..Default::default()
         };
         assert!(!template_matches(&empty, "Email 1"));
+    }
+
+    /// Exact Swift/Mautic wire from production (`href=3D` + soft-wrapped `?ct=`).
+    #[test]
+    fn real_mautic_quoted_printable_is_decoded() {
+        let raw = b"Message-ID: <fbba0234c570eaf1d742fcca6f6a9cdd@email.superfeelsapp.com>\r\n\
+Date: Sat, 05 Sep 2026 11:07:03 -0700\r\n\
+Subject: mime test\r\n\
+From: Super Feels <info@superfeelsapp.com>\r\n\
+Reply-To: jennifer@superfeelshub.com\r\n\
+To: Sohag Hossain <sohagbdmt@gmail.com>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/alternative;\r\n boundary=\"_=_swift_1788631623_589adaa32698dbb1e12af6279c61b611_=_\"\r\n\
+List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\
+List-Unsubscribe: <https://email.superfeelsapp.com/email/unsubscribe/6a9c5a479ad71688482322>\r\n\
+\r\n\
+--_=_swift_1788631623_589adaa32698dbb1e12af6279c61b611_=_\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+Content-Transfer-Encoding: quoted-printable\r\n\
+\r\n\
+check [https://email.superfeelsapp.com/r/71da027e650ab8e07a38e046d?ct=3DYTo=\r\n\
+0OntzOjY6InNvdXJjZSI7YTowOnt9czo1OiJlbWFpbCI7TjtzOjQ6InN0YXQiO3M6MjI6IjZhOW=\r\n\
+M1YTQ3OWFkNzE2ODg0ODIzMjIiO3M6NDoibGVhZCI7czo0OiIzMzgwIjt9]koro akhon\r\n\
+\r\n\
+--_=_swift_1788631623_589adaa32698dbb1e12af6279c61b611_=_\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+Content-Transfer-Encoding: quoted-printable\r\n\
+\r\n\
+<p><a href=3D\"https://email.superfeelsapp.com/r/71da027e650ab8e07a38e046d?c=\r\n\
+t=3DYTo0OntzOjY6InNvdXJjZSI7YTowOnt9czo1OiJlbWFpbCI7TjtzOjQ6InN0YXQiO3M6MjI=\r\n\
+6IjZhOWM1YTQ3OWFkNzE2ODg0ODIzMjIiO3M6NDoibGVhZCI7czo0OiIzMzgwIjt9\">check </=\r\n\
+a>koro akhon</p><img height=3D\"1\" width=3D\"1\" src=3D\"https://email.superfee=\r\n\
+lsapp.com/email/6a9c5a479ad71688482322.gif\" alt=3D\"\" />\r\n\
+\r\n\
+--_=_swift_1788631623_589adaa32698dbb1e12af6279c61b611_=_--\r\n";
+
+        let (html, _) = decoded_bodies(raw);
+        let html = html.expect("html part");
+        assert!(
+            !html.contains("=3D"),
+            "QP must be decoded before we read hrefs, got: {html}"
+        );
+        assert!(html.contains("href=\"https://email.superfeelsapp.com/r/71da027e650ab8e07a38e046d?ct="));
+        assert!(html.contains("6a9c5a479ad71688482322.gif"));
+
+        let tracking = extract_tracking(raw);
+        assert_eq!(
+            tracking.links[0],
+            "https://email.superfeelsapp.com/r/71da027e650ab8e07a38e046d?ct=YTo0OntzOjY6InNvdXJjZSI7YTowOnt9czo1OiJlbWFpbCI7TjtzOjQ6InN0YXQiO3M6MjI6IjZhOWM1YTQ3OWFkNzE2ODg0ODIzMjIiO3M6NDoibGVhZCI7czo0OiIzMzgwIjt9"
+        );
+        assert_eq!(
+            tracking.unsubscribe.as_deref(),
+            Some("https://email.superfeelsapp.com/email/unsubscribe/6a9c5a479ad71688482322")
+        );
+        assert!(tracking.pixels[0].ends_with("6a9c5a479ad71688482322.gif"));
+        assert!(template_matches(
+            &ContentTemplate {
+                match_subject: "mime test".into(),
+                subject: "rotated".into(),
+                body: "<p><a href=\"{{link1}}\">x</a></p>".into(),
+                ..Default::default()
+            },
+            "mime test"
+        ));
+    }
+
+    #[test]
+    fn real_campaign_skips_view_and_unsub_when_numbering_clicks() {
+        let html = r#"<a href="https://email.superfeelsapp.com/email/view/6a9c5dfcc4150893824900">View in browser</a>
+<a href="https://email.superfeelsapp.com/r/12c69e4affb329c8fb3cef0b0?ct=abc&"><img src="https://email.superfeelsapp.com/media/images/sidebar_logo.png" width="145"></a>
+<a href="https://email.superfeelsapp.com/r/12c69e4affb329c8fb3cef0b0?ct=abc&" class="cta">JOIN + SHOP</a>
+<a href="https://email.superfeelsapp.com/r/12c69e4affb329c8fb3cef0b0?ct=abc&">Visit Super Feels</a>
+<a href="https://email.superfeelsapp.com/email/unsubscribe/6a9c5dfcc4150893824900">Unsubscribe</a>
+<img height="1" width="1" src="https://email.superfeelsapp.com/email/6a9c5dfcc4150893824900.gif" alt="" />"#;
+        let raw = format!(
+            "Subject: Your New Daily Ritual: Feel Good, Stay You\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+List-Unsubscribe: <https://email.superfeelsapp.com/email/unsubscribe/6a9c5dfcc4150893824900>\r\n\
+\r\n{html}"
+        )
+        .into_bytes();
+
+        let tracking = extract_tracking(&raw);
+        assert_eq!(
+            tracking.view.as_deref(),
+            Some("https://email.superfeelsapp.com/email/view/6a9c5dfcc4150893824900")
+        );
+        assert_eq!(
+            tracking.links,
+            vec!["https://email.superfeelsapp.com/r/12c69e4affb329c8fb3cef0b0?ct=abc&".to_string()]
+        );
+        assert_eq!(
+            tracking.unsubscribe.as_deref(),
+            Some("https://email.superfeelsapp.com/email/unsubscribe/6a9c5dfcc4150893824900")
+        );
+        assert!(tracking.pixels.iter().any(|src| src.ends_with("6a9c5dfcc4150893824900.gif")));
+
+        let template = ContentTemplate {
+            id: "v2".to_string(),
+            match_subject: "Your New Daily Ritual: Feel Good, Stay You".to_string(),
+            subject: String::new(),
+            body: r#"<p><a href="{{view}}">View</a></p>
+<p><a href="{{link1}}">Shop</a></p>
+<p><a href="https://example.com/unsubscribe">Unsubscribe</a></p>"#
+                .to_string(),
+        };
+        let mut message = Message::parse(&raw).unwrap();
+        let mut notes = Vec::new();
+        apply_template(&mut message, &raw, &template, &mut notes);
+        let applied = extract_html(&message.to_bytes()).unwrap();
+        assert!(applied.contains("email/view/6a9c5dfcc4150893824900"));
+        assert!(applied.contains("/r/12c69e4affb329c8fb3cef0b0?ct=abc&"));
+        assert!(applied.contains("email/unsubscribe/6a9c5dfcc4150893824900"));
+        assert!(!applied.contains("example.com/unsubscribe"));
+    }
+
+    #[test]
+    fn unsubscribe_is_injected_when_template_has_no_unsub_link() {
+        let raw = format!(
+            "Subject: Offer\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+List-Unsubscribe: <https://email.superfeelsapp.com/email/unsubscribe/leadhash>\r\n\
+\r\n\
+<a href=\"https://email.superfeelsapp.com/r/click1\">Shop</a>\
+<a href=\"https://email.superfeelsapp.com/email/unsubscribe/leadhash\">Unsubscribe</a>\
+<img height=\"1\" width=\"1\" src=\"https://email.superfeelsapp.com/email/leadhash.gif\" />"
+        )
+        .into_bytes();
+        let template = ContentTemplate {
+            id: "plain".to_string(),
+            match_subject: "Offer".to_string(),
+            subject: "New subject".to_string(),
+            body: "<html><body><p>Fresh copy</p><a href=\"{{link1}}\">Shop</a></body></html>".to_string(),
+        };
+        let mut message = Message::parse(&raw).unwrap();
+        let mut notes = Vec::new();
+        apply_template(&mut message, &raw, &template, &mut notes);
+        let applied = extract_html(&message.to_bytes()).unwrap();
+        assert!(applied.contains("Fresh copy"));
+        assert!(applied.contains("/r/click1"));
+        assert!(applied.contains("email/unsubscribe/leadhash"));
+        assert!(applied.contains("Unsubscribe"));
+        assert!(applied.contains("leadhash.gif"));
+        assert!(message
+            .value("list-unsubscribe")
+            .unwrap()
+            .contains("email/unsubscribe/leadhash"));
     }
 }

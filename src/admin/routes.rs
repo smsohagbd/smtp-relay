@@ -1538,12 +1538,16 @@ fn message(state: &Arc<AppState>, id: &str) -> Response {
             let mut value = serde_json::to_value(&record).unwrap_or_else(|_| json!({}));
             if let Some((raw, path)) = state.inbound_dump(id) {
                 let tracking = crate::message::rotation::extract_tracking(&raw);
+                let (html, text) = crate::message::rotation::decoded_bodies(&raw);
                 value["inbound_raw"] = json!(String::from_utf8_lossy(&raw));
                 value["inbound_raw_bytes"] = json!(raw.len());
                 value["inbound_raw_path"] = json!(path.map(|p| p.display().to_string()));
+                value["inbound_html"] = json!(html);
+                value["inbound_text"] = json!(text);
                 value["inbound_links"] = json!(tracking.links);
                 value["inbound_pixels"] = json!(tracking.pixels);
                 value["inbound_unsubscribe"] = json!(tracking.unsubscribe);
+                value["inbound_view"] = json!(tracking.view);
             }
             Response::json_value(200, &value)
         }

@@ -33,7 +33,8 @@ newsletters, custom scripts. No plugin and no vendor lock-in.
   turn on **content rotation**
 - Optional **content rotation**: templates match a Mautic campaign by Subject.
   Same-subject templates rotate round-robin; no match leaves the email unchanged.
-  Write `{{link1}}`, `{{link2}}`, `{{unsubscribe}}` — they become the original tracked links.
+  Write `{{link1}}` for the first unique click, `{{view}}` / `{{unsubscribe}}`
+  for webview and unsub (or leave those links in the HTML — they are rewritten).
   Open-tracking pixels are copied automatically. Turn on **Capture inbound MIME**
   in Recent messages to see (and copy) the exact MIME Mautic submitted.
 - Automatic retry if a provider fails; circuit breaker skips a dead account

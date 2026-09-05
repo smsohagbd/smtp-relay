@@ -155,7 +155,7 @@ rotation:
   #   - id: "email1-a"
   #     match_subject: "Email 1"
   #     subject: "A new daily ritual"
-  #     body: "<p>New wording.</p><p><a href=\"{{link1}}\">Read more</a> · <a href=\"{{unsubscribe}}\">Unsubscribe</a></p>"
+  #     body: "<p><a href=\"{{view}}\">View</a></p><p><a href=\"{{link1}}\">Read more</a> · <a href=\"{{unsubscribe}}\">Unsubscribe</a></p>"
   #   - id: "email1-b"
   #     match_subject: "Email 1"
   #     subject: "Feel good, stay you"
