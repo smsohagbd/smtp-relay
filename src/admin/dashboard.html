@@ -579,6 +579,7 @@ let currentTab = "messages";
 const MESSAGE_PAGE_SIZE = 50;
 let messagePage = 1;
 let rotationTemplates = [];
+let rotationDrawn = false;
 let inboundMimeText = "";
 
 // --- overview cards ---------------------------------------------------------
@@ -890,7 +891,8 @@ async function loadRelays() {
   renderRelays();
 }
 
-async function loadTab() {
+async function loadTab(reason) {
+  reason = reason || "open";
   if (currentTab === "messages") {
     const status = $("msg-status").value;
     const payload = await api(
@@ -902,8 +904,10 @@ async function loadTab() {
   } else if (currentTab === "queue") {
     renderQueue(await api("/api/queue?limit=200"));
   } else if (currentTab === "rotation") {
+    if (reason === "refresh" && rotationDrawn) return;
     await loadRotation();
   } else if (currentTab === "config") {
+    if (reason === "refresh" && document.activeElement === $("config-json")) return;
     const payload = await api("/api/config");
     $("config-json").value = JSON.stringify(payload.config, null, 2);
     $("btn-apply-config").disabled = !payload.writable;
@@ -915,7 +919,7 @@ async function refreshAll() {
   if (refreshing) return;
   refreshing = true;
   try {
-    await Promise.all([loadStatus(), loadRelays(), loadTab()]);
+    await Promise.all([loadStatus(), loadRelays(), loadTab("refresh")]);
   } catch (error) {
     toast(error.message, "bad");
   } finally {
@@ -1119,8 +1123,16 @@ $("btn-clear-messages").onclick = () => {
   messagePage = 1;
   act("/api/messages", { method: "DELETE" }, "Activity log cleared");
 };
+function rotationFormIsActive() {
+  const active = document.activeElement;
+  const box = $("rotation-templates");
+  return !!(active && box && box.contains(active));
+}
+
 async function loadRotation() {
+  if (rotationFormIsActive()) return;
   const payload = await api("/api/rotation");
+  if (rotationFormIsActive()) return;
   $("rotation-enabled").checked = !!payload.enabled;
   $("btn-save-rotation").disabled = payload.writable === false;
   $("btn-add-template").disabled = payload.writable === false;
@@ -1157,6 +1169,7 @@ function renderRotation() {
       </div>
     </div>
   `).join("");
+  rotationDrawn = true;
 }
 
 function collectRotation() {
