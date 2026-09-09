@@ -54,13 +54,16 @@ Your apps never see the real SMTP passwords. They only talk to smtp-relay.
 Linux VPS (Ubuntu / Debian and similar). SSH in, then:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y git curl
 git clone https://github.com/smsohagbd/smtp-relay.git
 cd smtp-relay
 chmod +x setup.sh
 ./setup.sh
 ```
+
+If `git` is missing: `sudo apt-get install -y git` (or download the zip from
+GitHub). Do **not** run a separate `apt-get update` first — a leftover PPA
+(for example certbot on Ubuntu 24.04) can 404 and block the whole machine.
+`setup.sh` updates apt itself and skips broken third-party repos.
 
 `setup.sh` installs the compiler and Rust if needed, asks four questions,
 builds the release binary, and starts `smtp-relay` as a systemd service.

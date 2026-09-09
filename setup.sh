@@ -63,12 +63,140 @@ load_cargo() {
   export PATH="$HOME/.cargo/bin:$PATH"
 }
 
+is_official_apt_source() {
+  local base
+  base="$(basename "$1")"
+  case "$base" in
+    ubuntu.sources|ubuntu.list|debian.sources|debian.list|ubuntu-sources.list) return 0 ;;
+  esac
+  return 1
+}
+
+disable_apt_source_file() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  case "$f" in
+    *.disabled|*.bak|*.save|*.distUpgrade) return 0 ;;
+  esac
+  if is_official_apt_source "$f"; then
+    return 0
+  fi
+  echo "    disabling broken apt repo: $f"
+  as_root mv "$f" "${f}.disabled" || true
+}
+
+# Rename third-party list files that match a URL/host from a failed apt update.
+disable_apt_files_matching() {
+  local needle="$1"
+  local f
+  [ -n "$needle" ] || return 0
+  if [ -f /etc/apt/sources.list ]; then
+    if grep -qiF "$needle" /etc/apt/sources.list 2>/dev/null; then
+      echo "    comment out matching lines in /etc/apt/sources.list ($needle)"
+      as_root sed -i.bak-smtp-relay -E "s|^(deb(-src)?[[:space:]].*${needle})|# smtp-relay: \\1|" /etc/apt/sources.list || true
+    fi
+  fi
+  shopt -s nullglob
+  for f in /etc/apt/sources.list.d/*; do
+    [ -f "$f" ] || continue
+    if grep -qiF "$needle" "$f" 2>/dev/null; then
+      disable_apt_source_file "$f"
+    fi
+  done
+  shopt -u nullglob
+}
+
+disable_failed_apt_repos_from_log() {
+  local log="$1"
+  local url host path
+  # Certbot PPA has no Ubuntu 24.04 (noble) packages — always drop it on failure.
+  shopt -s nullglob
+  for f in /etc/apt/sources.list.d/*certbot*; do
+    disable_apt_source_file "$f"
+  done
+  shopt -u nullglob
+
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    url="${url%/Release}"
+    url="${url%/InRelease}"
+    host="${url#http://}"
+    host="${host#https://}"
+    path="${host#*/}"
+    host="${host%%/*}"
+    case "$host" in
+      archive.ubuntu.com|security.ubuntu.com|ports.ubuntu.com|deb.debian.org|security.debian.org|cdn-aws.deb.debian.org)
+        continue
+        ;;
+    esac
+    disable_apt_files_matching "$url"
+    if [ -n "$host" ]; then
+      disable_apt_files_matching "$host"
+    fi
+    if [ -n "$path" ]; then
+      path="${path%% *}"
+      disable_apt_files_matching "${host}/${path%%/*}"
+    fi
+  done <<EOF
+$(grep -E '^Err:' "$log" 2>/dev/null | grep -oE 'https?://[^[:space:]]+' | sed 's|[[:punct:]]*$||' || true)
+$(grep -oE "The repository '[^']+'" "$log" 2>/dev/null | sed "s/The repository '//;s/'\$//;s| Release\$||;s| InRelease\$||" || true)
+EOF
+}
+
+disable_all_third_party_apt_repos() {
+  local f
+  echo "    disabling remaining third-party apt repos so Ubuntu/Debian archives can install packages"
+  shopt -s nullglob
+  for f in /etc/apt/sources.list.d/*; do
+    disable_apt_source_file "$f"
+  done
+  shopt -u nullglob
+}
+
+apt_update_once() {
+  local log="$1"
+  set +e
+  as_root apt-get update -y >"$log" 2>&1
+  local rc=$?
+  set -e
+  cat "$log"
+  return "$rc"
+}
+
+apt_update_debian() {
+  local log
+  log="$(mktemp /tmp/smtp-relay-apt.XXXXXX.log)"
+  if apt_update_once "$log"; then
+    rm -f "$log"
+    return 0
+  fi
+
+  echo "apt-get update failed (broken third-party repo, not smtp-relay). Skipping the 404 source and retrying…"
+  disable_failed_apt_repos_from_log "$log"
+  if apt_update_once "$log"; then
+    echo "apt-get update succeeded after disabling the broken repo."
+    rm -f "$log"
+    return 0
+  fi
+
+  disable_all_third_party_apt_repos
+  if apt_update_once "$log"; then
+    echo "apt-get update succeeded using distro archives only."
+    rm -f "$log"
+    return 0
+  fi
+
+  echo "apt-get update still failed. Inspect $log and the 404 repo, then re-run ./setup.sh" >&2
+  cat "$log" >&2
+  exit 1
+}
+
 install_system_packages() {
   echo
   echo "==> Installing build dependencies (compiler, OpenSSL, curl)…"
 
   if command -v apt-get >/dev/null 2>&1; then
-    as_root apt-get update -y
+    apt_update_debian
     as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates curl git build-essential pkg-config libssl-dev
   elif command -v dnf >/dev/null 2>&1; then
