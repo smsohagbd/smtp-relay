@@ -227,6 +227,41 @@ pub async fn attempt_delivery(
             record.attempts = message.attempts;
         });
 
+    if message.attempts == 1 && config.validation.enabled {
+        let checks =
+            crate::validation::filter_recipients(&config.validation, &message.recipients).await;
+        let mut notes = Vec::new();
+        let mut valid = Vec::new();
+        for check in checks {
+            notes.push(format!("{}: {}", check.address, check.detail));
+            if check.deliver {
+                state.metrics.inc(&state.metrics.counters.validation_passed);
+                valid.push(check.address);
+            } else {
+                state.metrics.inc(&state.metrics.counters.validation_skipped);
+                tracing::info!(
+                    id = %message.id,
+                    recipient = %check.address,
+                    reason = %check.detail,
+                    "skipping invalid recipient"
+                );
+            }
+        }
+        state.metrics.activity.update(&message.id, |record| {
+            record.notes.extend(notes);
+            record.recipients = valid.clone();
+        });
+        if valid.is_empty() {
+            return finish_failed(
+                state,
+                message,
+                "validation".to_string(),
+                "all recipients failed the Stalwart delivery test".to_string(),
+            );
+        }
+        message.recipients = valid;
+    }
+
     // Relays tried during *this* round. History in `message.tried_relays` is
     // kept for the dashboard but must not permanently exclude a relay: after a
     // backoff a previously failing relay may well be healthy again.

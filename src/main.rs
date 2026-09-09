@@ -19,6 +19,7 @@ mod relay;
 mod smtp;
 mod state;
 mod util;
+mod validation;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

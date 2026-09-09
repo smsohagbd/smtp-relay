@@ -144,6 +144,9 @@
     background: var(--bg);
   }
   .template-card textarea { width: 100%; min-height: 120px; }
+  .panel-body .row { display: grid; gap: 5px; }
+  .panel-body .row > span { font-size: 12px; color: var(--muted); }
+  .panel-body .row input, .panel-body .row select { width: 100%; }
 
   @media (max-width: 860px) {
     header, main { padding-left: 12px; padding-right: 12px; }
@@ -283,6 +286,7 @@
       <button data-tab="messages" class="active">Recent messages</button>
       <button data-tab="queue">Retry queue</button>
       <button data-tab="rotation">Content rotation</button>
+      <button data-tab="validation">Address check</button>
       <button data-tab="config">Configuration</button>
     </div>
 
@@ -343,6 +347,47 @@
         </p>
         <div id="rotation-templates"></div>
         <div class="err" id="rotation-error" style="margin-top:8px"></div>
+      </div>
+    </div>
+
+    <div class="panel hidden" id="tab-validation">
+      <div class="panel-head">
+        <strong>Address check</strong>
+        <label class="inline">
+          <input type="checkbox" id="validation-enabled"> Enable (Stalwart delivery test)
+        </label>
+        <div class="spacer"></div>
+        <button id="btn-add-validator">Add Stalwart server</button>
+        <button class="primary" id="btn-save-validation">Save</button>
+      </div>
+      <div class="panel-body">
+        <p style="color:var(--muted);margin:0 0 12px;font-size:12.5px">
+          Before each message is forwarded to an SMTP relay, every recipient is
+          probed on all listed Stalwart servers at once
+          (<span class="mono">GET /api/live/delivery/{email}</span> — the same
+          Email Delivery test as Manage → Troubleshoot).
+          <strong>rcptToSuccess</strong> sends the address;
+          <strong>rcptToError</strong> skips it so invalid mailboxes never reach
+          the paid pool.
+          Use the same <strong>admin username and password</strong> you use to
+          open the Stalwart web UI. Leave the token field empty — you do not
+          create a token.
+        </p>
+        <div class="grid-2" style="margin-bottom:12px">
+          <div class="row">
+            <span>Probe timeout (seconds)</span>
+            <input type="number" id="validation-timeout" min="1" max="120" value="20">
+          </div>
+          <div class="row">
+            <span>If every API is down</span>
+            <select id="validation-on-error">
+              <option value="allow">Allow — still send</option>
+              <option value="skip">Skip — drop the address</option>
+            </select>
+          </div>
+        </div>
+        <div id="validation-servers"></div>
+        <div class="err" id="validation-error" style="margin-top:8px"></div>
       </div>
     </div>
 
@@ -581,7 +626,23 @@ const MESSAGE_PAGE_SIZE = 50;
 let messagePage = 1;
 let rotationTemplates = [];
 let rotationDrawn = false;
+let validationServers = [];
+let validationDrawn = false;
 let inboundMimeText = "";
+
+function validationCardValue(counters, validation) {
+  if (!validation || !validation.enabled) return "off";
+  return num(counters.validation_skipped || 0) + " skipped";
+}
+function validationCardFoot(counters, validation) {
+  const passed = num(counters.validation_passed || 0);
+  const servers = validation ? validation.servers : 0;
+  return passed + " accepted · " + servers + " API" + (servers === 1 ? "" : "s");
+}
+function validationCardTone(counters, validation) {
+  if (!validation || !validation.enabled) return null;
+  return (counters.validation_skipped || 0) > 0 ? "warn" : "ok";
+}
 
 // --- overview cards ---------------------------------------------------------
 function renderCards() {
@@ -598,6 +659,7 @@ function renderCards() {
     { label: "Failed", value: num(counters.messages_failed + counters.messages_rejected), foot: num(counters.messages_rejected) + " refused, " + num(counters.messages_dead) + " gave up", tone: (counters.messages_failed + counters.messages_rejected) > 0 ? "bad" : null },
     { label: "Success rate", value: rate.toFixed(1) + "%", foot: "of attempted", tone: rate >= 99 ? "ok" : (rate >= 90 ? "warn" : "bad") },
     { label: "Relays in rotation", value: relays.eligible + " / " + relays.total, foot: relays.active + " active, " + relays.healthy + " healthy", tone: relays.eligible === 0 ? "bad" : (relays.eligible < relays.total ? "warn" : "ok") },
+    { label: "Address check", value: validationCardValue(counters, STATUS.validation), foot: validationCardFoot(counters, STATUS.validation), tone: validationCardTone(counters, STATUS.validation) },
     { label: "Queue depth", value: num(queue.depth), foot: queue.in_flight + " sending, " + queue.due + " due", tone: queue.depth > 0 ? "warn" : null },
     { label: "Connections", value: num(counters.connections_active), foot: num(counters.connections_total) + " total" },
     { label: "Uptime", value: STATUS.uptime_human, foot: "v" + STATUS.version },
@@ -907,6 +969,9 @@ async function loadTab(reason) {
   } else if (currentTab === "rotation") {
     if (rotationDrawn) return;
     await loadRotation();
+  } else if (currentTab === "validation") {
+    if (validationDrawn) return;
+    await loadValidation();
   } else if (currentTab === "config") {
     if (reason === "refresh" && document.activeElement === $("config-json")) return;
     const payload = await api("/api/config");
@@ -932,7 +997,7 @@ async function refreshAll(force) {
   refreshing = true;
   try {
     const jobs = [loadStatus(), loadRelays()];
-    if (currentTab !== "rotation") jobs.push(loadTab("refresh"));
+    if (currentTab !== "rotation" && currentTab !== "validation") jobs.push(loadTab("refresh"));
     await Promise.all(jobs);
   } catch (error) {
     toast(error.message, "bad");
@@ -1231,6 +1296,96 @@ $("btn-save-rotation").onclick = async () => {
   }
 };
 
+async function loadValidation() {
+  const payload = await api("/api/validation");
+  $("validation-enabled").checked = !!payload.enabled;
+  $("validation-timeout").value = payload.timeout_seconds || 20;
+  $("validation-on-error").value = payload.on_probe_error === "skip" ? "skip" : "allow";
+  $("btn-save-validation").disabled = payload.writable === false;
+  $("btn-add-validator").disabled = payload.writable === false;
+  validationServers = (payload.servers || []).map((server, index) => ({
+    id: server.id || ("sw" + (index + 1)),
+    base_url: server.base_url || "",
+    username: server.username || "",
+    password: server.password || "",
+    token: server.token || "",
+  }));
+  if (!validationServers.length) {
+    validationServers.push({ id: "sw1", base_url: "", username: "", password: "", token: "" });
+  }
+  renderValidation();
+}
+
+function renderValidation() {
+  $("validation-servers").innerHTML = validationServers.map((server, index) => `
+    <div class="template-card" data-v="${index}">
+      <div class="grid-2">
+        <div class="row"><span>Id</span><input type="text" data-field="id" value="${escapeHtml(server.id)}"></div>
+        <div class="row"><span>Base URL</span><input type="text" data-field="base_url" value="${escapeHtml(server.base_url)}" placeholder="https://mail1.example.com"></div>
+      </div>
+      <div class="grid-2" style="margin-top:8px">
+        <div class="row"><span>Username</span><input type="text" data-field="username" value="${escapeHtml(server.username)}" autocomplete="off"></div>
+        <div class="row"><span>Password</span><input type="password" data-field="password" value="${escapeHtml(server.password)}" autocomplete="new-password"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span>Token — leave empty</span>
+        <input type="password" data-field="token" value="${escapeHtml(server.token)}" autocomplete="new-password">
+      </div>
+      <div class="actions" style="border:0;padding:8px 0 0">
+        <div class="spacer"></div>
+        <button class="tiny danger" data-remove-validator="${index}">Remove</button>
+      </div>
+    </div>
+  `).join("");
+  validationDrawn = true;
+}
+
+function collectValidation() {
+  return {
+    enabled: $("validation-enabled").checked,
+    timeout_seconds: Number($("validation-timeout").value) || 20,
+    on_probe_error: $("validation-on-error").value === "skip" ? "skip" : "allow",
+    servers: Array.from($("validation-servers").querySelectorAll(".template-card")).map((card) => ({
+      id: card.querySelector("[data-field=id]").value.trim(),
+      base_url: card.querySelector("[data-field=base_url]").value.trim(),
+      username: card.querySelector("[data-field=username]").value.trim(),
+      password: card.querySelector("[data-field=password]").value,
+      token: card.querySelector("[data-field=token]").value.trim(),
+    })),
+  };
+}
+
+$("btn-add-validator").onclick = () => {
+  const current = collectValidation();
+  validationServers = current.servers;
+  validationServers.push({ id: "sw" + (validationServers.length + 1), base_url: "", username: "", password: "", token: "" });
+  renderValidation();
+};
+
+$("validation-servers").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-remove-validator]");
+  if (!button) return;
+  const current = collectValidation();
+  current.servers.splice(Number(button.dataset.removeValidator), 1);
+  validationServers = current.servers.length
+    ? current.servers
+    : [{ id: "sw1", base_url: "", username: "", password: "", token: "" }];
+  renderValidation();
+});
+
+$("btn-save-validation").onclick = async () => {
+  $("validation-error").textContent = "";
+  try {
+    await api("/api/validation", { method: "PUT", body: JSON.stringify(collectValidation()) });
+    toast("Address check saved", "ok");
+    validationDrawn = false;
+    await loadValidation();
+  } catch (error) {
+    $("validation-error").textContent = error.message;
+    toast(error.message, "bad");
+  }
+};
+
 $("btn-reload-config").onclick = () => act("/api/config/reload", { method: "POST" }, "Configuration reloaded");
 $("btn-save-config").onclick = () => act("/api/config/save", { method: "POST" }, "Configuration written");
 
@@ -1302,7 +1457,7 @@ $("tabs").addEventListener("click", (event) => {
   if (!button) return;
   currentTab = button.dataset.tab;
   for (const tab of $("tabs").querySelectorAll("button")) tab.classList.toggle("active", tab === button);
-  for (const name of ["messages", "queue", "rotation", "config"]) $("tab-" + name).classList.toggle("hidden", name !== currentTab);
+  for (const name of ["messages", "queue", "rotation", "validation", "config"]) $("tab-" + name).classList.toggle("hidden", name !== currentTab);
   loadTab().catch((error) => toast(error.message, "bad"));
 });
 

@@ -165,6 +165,31 @@ rotation:
   #     subject: "Tonight only"
   #     body: "<p>Another campaign.</p><p><a href=\"{{link1}}\">Open</a></p>"
 
+# Probe each recipient on Stalwart's Email Delivery test
+# (GET /api/live/delivery/{email}) before the message is handed to an
+# upstream SMTP relay. All listed APIs are queried in parallel. The
+# address is sent only when at least one server reports rcptToSuccess.
+# rcptToError (unknown mailbox) skips that recipient so it never bounces
+# at the paid SMTP pool. Off until you add servers and enable it.
+validation:
+  enabled: false
+  timeout_seconds: 20
+  # allow = if every Stalwart API is down, still send
+  # skip  = if every Stalwart API is down, drop the address
+  on_probe_error: allow
+  servers: []
+  # servers:
+  #   - id: "sw1"
+  #     base_url: "https://mail1.example.com"
+  #     username: "admin"
+  #     password: "secret"
+  #     token: ""
+  #   - id: "sw2"
+  #     base_url: "https://mail2.example.com"
+  #     username: "admin"
+  #     password: "secret"
+  #     token: ""
+
 queue:
   enabled: true
 

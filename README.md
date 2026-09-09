@@ -37,6 +37,11 @@ newsletters, custom scripts. No plugin and no vendor lock-in.
   for webview and unsub (or leave those links in the HTML — they are rewritten).
   Open-tracking pixels are copied automatically. Turn on **Capture inbound MIME**
   in Recent messages to see (and copy) the exact MIME Mautic submitted.
+- Optional **address check**: before SMTP, each recipient is probed on every
+  configured Stalwart server in parallel (`GET /api/live/delivery/{email}`,
+  the same Email Delivery test as Manage → Troubleshoot). `rcptToSuccess`
+  sends the message; `rcptToError` skips that address so it never hits the
+  relay pool. Configure it on the **Address check** tab.
 - Automatic retry if a provider fails; circuit breaker skips a dead account
 - Web UI: add, clone, bulk-import, test, pause, or delete providers
 - Disk mail log like Postfix/Exim: `/var/log/smtp-relay/maillog`

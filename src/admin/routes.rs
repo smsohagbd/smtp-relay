@@ -10,7 +10,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::admin::http::{HandlerFuture, Reply, Request, Response};
-use crate::config::{AuthConfig, Config, RelayConfig, RotationConfig, StickyMode, Strategy, TlsMode};
+use crate::config::{
+    AuthConfig, Config, RelayConfig, RotationConfig, StickyMode, Strategy, TlsMode, ValidationConfig,
+};
 use crate::events::EventKind;
 use crate::metrics::{MessageStatus, RelayMetricsRow};
 use crate::relay::health;
@@ -131,6 +133,8 @@ async fn route(state: Arc<AppState>, request: Request) -> Reply {
         ("POST", ["api", "config", "save"]) => save_config(&state).into(),
         ("GET", ["api", "rotation"]) => rotation_get(&state).into(),
         ("PUT", ["api", "rotation"]) => rotation_put(&state, &request).into(),
+        ("GET", ["api", "validation"]) => validation_get(&state).into(),
+        ("PUT", ["api", "validation"]) => validation_put(&state, &request).into(),
         ("GET", ["api", "debug", "inbound"]) => inbound_debug_get(&state).into(),
         ("PUT", ["api", "debug", "inbound"]) => inbound_debug_put(&state, &request).into(),
 
@@ -415,6 +419,12 @@ fn status(state: &Arc<AppState>, request: &Request) -> Response {
             "rotation": {
                 "enabled": config.rotation.enabled,
                 "templates": config.rotation.templates.len(),
+            },
+            "validation": {
+                "enabled": config.validation.enabled,
+                "servers": config.validation.usable().count(),
+                "timeout_seconds": config.validation.timeout_seconds,
+                "on_probe_error": config.validation.on_probe_error,
             },
             "logging": {
                 "dump_inbound": config.logging.dump_inbound,
@@ -1411,6 +1421,65 @@ fn rotation_put(state: &Arc<AppState>, request: &Request) -> Response {
                     "ok": true,
                     "enabled": incoming.enabled,
                     "templates": incoming.templates,
+                }),
+            )
+        }
+        Err(error) => Response::error(422, &error),
+    }
+}
+
+fn validation_get(state: &Arc<AppState>) -> Response {
+    let config = state.config();
+    let redacted = config.redacted();
+    Response::json_value(
+        200,
+        &json!({
+            "enabled": redacted.validation.enabled,
+            "timeout_seconds": redacted.validation.timeout_seconds,
+            "on_probe_error": redacted.validation.on_probe_error,
+            "servers": redacted.validation.servers,
+            "writable": config.admin.allow_config_write,
+        }),
+    )
+}
+
+fn validation_put(state: &Arc<AppState>, request: &Request) -> Response {
+    if !state.config().admin.allow_config_write {
+        return Response::error(403, "admin.allow_config_write is disabled");
+    }
+    let mut incoming: ValidationConfig = match request.body_json() {
+        Ok(value) => value,
+        Err(error) => return Response::error(400, &error),
+    };
+    for (index, server) in incoming.servers.iter_mut().enumerate() {
+        if server.id.trim().is_empty() {
+            server.id = format!("sw{}", index + 1);
+        }
+        server.id = server.id.trim().to_string();
+        server.base_url = server.base_url.trim().trim_end_matches('/').to_string();
+        server.username = server.username.trim().to_string();
+        server.token = server.token.trim().to_string();
+    }
+    match state.edit_config(should_persist(state, request), |config| {
+        let previous = config.clone();
+        config.validation = incoming.clone();
+        config.restore_secrets_from(&previous);
+    }) {
+        Ok(_) => {
+            tracing::info!(
+                enabled = incoming.enabled,
+                servers = incoming.servers.len(),
+                "address validation updated"
+            );
+            let saved = state.config().redacted().validation;
+            Response::json_value(
+                200,
+                &json!({
+                    "ok": true,
+                    "enabled": saved.enabled,
+                    "timeout_seconds": saved.timeout_seconds,
+                    "on_probe_error": saved.on_probe_error,
+                    "servers": saved.servers,
                 }),
             )
         }

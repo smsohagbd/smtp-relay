@@ -55,6 +55,8 @@ pub struct Counters {
 
     pub routing_no_relay_available: AtomicU64,
     pub rewrite_errors: AtomicU64,
+    pub validation_passed: AtomicU64,
+    pub validation_skipped: AtomicU64,
 }
 
 macro_rules! counter_snapshot {
@@ -86,6 +88,8 @@ impl Counters {
             queue_retries,
             routing_no_relay_available,
             rewrite_errors,
+            validation_passed,
+            validation_skipped,
         )
     }
 }
@@ -111,6 +115,8 @@ pub struct CountersSnapshot {
     pub queue_retries: u64,
     pub routing_no_relay_available: u64,
     pub rewrite_errors: u64,
+    pub validation_passed: u64,
+    pub validation_skipped: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -906,6 +912,16 @@ impl Metrics {
             "routing_no_relay_total",
             "Routing decisions that found no eligible relay.",
             counters.routing_no_relay_available,
+        );
+        counter(
+            "validation_passed_total",
+            "Recipients accepted by the Stalwart delivery test.",
+            counters.validation_passed,
+        );
+        counter(
+            "validation_skipped_total",
+            "Recipients skipped after a failed Stalwart delivery test.",
+            counters.validation_skipped,
         );
 
         out.push_str("# HELP smtp_relay_connections_active Currently open inbound connections.\n");

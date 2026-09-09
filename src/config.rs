@@ -38,6 +38,7 @@ pub struct Config {
     pub admin: AdminConfig,
     pub logging: LoggingConfig,
     pub rotation: RotationConfig,
+    pub validation: ValidationConfig,
     pub relays: Vec<RelayConfig>,
 }
 
@@ -52,6 +53,7 @@ impl Default for Config {
             admin: AdminConfig::default(),
             logging: LoggingConfig::default(),
             rotation: RotationConfig::default(),
+            validation: ValidationConfig::default(),
             relays: Vec::new(),
         }
     }
@@ -276,6 +278,87 @@ impl ContentTemplate {
     pub fn is_usable(&self) -> bool {
         !self.match_subject.trim().is_empty()
             && (!self.subject.trim().is_empty() || !self.body.trim().is_empty())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// validation:  (Stalwart delivery test before SMTP)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ValidationConfig {
+    /// When true, each recipient is probed on the Stalwart APIs before the
+    /// message is handed to an upstream SMTP relay.
+    pub enabled: bool,
+    /// Per-probe budget passed to `/api/live/delivery/{email}?timeout=`.
+    pub timeout_seconds: u64,
+    /// If every Stalwart API is unreachable, still send (`allow`) or skip (`skip`).
+    pub on_probe_error: ProbeErrorPolicy,
+    pub servers: Vec<ValidationServer>,
+}
+
+impl Default for ValidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout_seconds: 20,
+            on_probe_error: ProbeErrorPolicy::Allow,
+            servers: Vec::new(),
+        }
+    }
+}
+
+impl ValidationConfig {
+    pub fn usable(&self) -> impl Iterator<Item = &ValidationServer> {
+        self.servers.iter().filter(|server| server.is_usable())
+    }
+
+    pub fn allow_on_probe_error(&self) -> bool {
+        matches!(self.on_probe_error, ProbeErrorPolicy::Allow)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeErrorPolicy {
+    Allow,
+    Skip,
+}
+
+impl Default for ProbeErrorPolicy {
+    fn default() -> Self {
+        Self::Allow
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ValidationServer {
+    pub id: String,
+    /// Base URL, e.g. `https://mail1.example.com`.
+    pub base_url: String,
+    pub username: String,
+    pub password: String,
+    /// Optional bearer token (used instead of basic auth when set).
+    pub token: String,
+}
+
+impl Default for ValidationServer {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            base_url: String::new(),
+            username: String::new(),
+            password: String::new(),
+            token: String::new(),
+        }
+    }
+}
+
+impl ValidationServer {
+    pub fn is_usable(&self) -> bool {
+        !self.base_url.trim().is_empty()
     }
 }
 
@@ -833,6 +916,14 @@ impl Config {
         if !clone.admin.password.is_empty() {
             clone.admin.password = REDACTED.to_string();
         }
+        for server in &mut clone.validation.servers {
+            if !server.password.is_empty() {
+                server.password = REDACTED.to_string();
+            }
+            if !server.token.is_empty() {
+                server.token = REDACTED.to_string();
+            }
+        }
         clone
     }
 
@@ -872,6 +963,22 @@ impl Config {
         }
         if self.admin.password == REDACTED {
             self.admin.password = previous.admin.password.clone();
+        }
+        for server in &mut self.validation.servers {
+            let Some(old) = previous
+                .validation
+                .servers
+                .iter()
+                .find(|entry| entry.id == server.id)
+            else {
+                continue;
+            };
+            if server.password == REDACTED {
+                server.password = old.password.clone();
+            }
+            if server.token == REDACTED {
+                server.token = old.token.clone();
+            }
         }
     }
 
@@ -1091,6 +1198,37 @@ impl Config {
             }
         }
 
+        if self.validation.enabled && self.validation.timeout_seconds == 0 {
+            return Err(invalid(
+                "validation.timeout_seconds must be at least 1".to_string(),
+            ));
+        }
+        if self.validation.enabled && self.validation.usable().next().is_none() {
+            return Err(invalid(
+                "validation.enabled requires at least one Stalwart server with a base_url"
+                    .to_string(),
+            ));
+        }
+        let mut seen_validators = BTreeMap::new();
+        for (index, server) in self.validation.servers.iter().enumerate() {
+            let id = server.id.trim();
+            if id.is_empty() {
+                continue;
+            }
+            if let Some(first) = seen_validators.insert(id.to_string(), index) {
+                return Err(invalid(format!(
+                    "duplicate validation server id `{id}` (servers[{first}] and servers[{index}])"
+                )));
+            }
+            if !server.base_url.trim().is_empty()
+                && !(server.base_url.starts_with("http://") || server.base_url.starts_with("https://"))
+            {
+                return Err(invalid(format!(
+                    "validation.servers[{index}].base_url must start with http:// or https://"
+                )));
+            }
+        }
+
         let mut seen_templates = BTreeMap::new();
         for (index, template) in self.rotation.templates.iter().enumerate() {
             let id = template.id.trim();
@@ -1275,6 +1413,69 @@ relays:
             redacted.relays[0].auth.as_ref().unwrap().password,
             "real-secret"
         );
+    }
+
+    #[test]
+    fn validation_parses_and_defaults_to_off() {
+        let yaml = r#"
+relays:
+  - id: "one"
+    host: "smtp.one.com"
+    from_address: "noreply@one.com"
+validation:
+  enabled: true
+  timeout_seconds: 15
+  on_probe_error: skip
+  servers:
+    - id: "sw1"
+      base_url: "https://mail1.example.com"
+      username: "admin"
+      password: "secret"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("parses");
+        config.validate().expect("valid");
+        assert!(config.validation.enabled);
+        assert_eq!(config.validation.timeout_seconds, 15);
+        assert_eq!(config.validation.on_probe_error, ProbeErrorPolicy::Skip);
+        assert_eq!(config.validation.servers[0].base_url, "https://mail1.example.com");
+    }
+
+    #[test]
+    fn validation_enabled_needs_a_server_url() {
+        let mut config = base_config();
+        config.validation.enabled = true;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("validation.enabled"), "{err}");
+    }
+
+    #[test]
+    fn validation_rejects_non_http_base_url() {
+        let mut config = base_config();
+        config.validation.servers.push(ValidationServer {
+            id: "sw1".into(),
+            base_url: "mail.example.com".into(),
+            ..Default::default()
+        });
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("base_url"), "{err}");
+    }
+
+    #[test]
+    fn validation_secrets_redact_and_restore() {
+        let mut config = base_config();
+        config.validation.servers.push(ValidationServer {
+            id: "sw1".into(),
+            base_url: "https://mail.example.com".into(),
+            username: "admin".into(),
+            password: "sw-pass".into(),
+            token: "sw-token".into(),
+        });
+        let mut redacted = config.redacted();
+        assert_eq!(redacted.validation.servers[0].password, REDACTED);
+        assert_eq!(redacted.validation.servers[0].token, REDACTED);
+        redacted.restore_secrets_from(&config);
+        assert_eq!(redacted.validation.servers[0].password, "sw-pass");
+        assert_eq!(redacted.validation.servers[0].token, "sw-token");
     }
 
     #[test]
