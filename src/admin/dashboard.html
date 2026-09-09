@@ -386,10 +386,10 @@
             <input type="number" id="validation-timeout" min="1" max="120" value="20">
           </div>
           <div class="row">
-            <span>If the test never reaches RCPT TO</span>
+            <span>If verify never finishes (timeout, API down, or no RCPT TO)</span>
             <select id="validation-on-error">
-              <option value="allow">Allow — still send</option>
-              <option value="skip">Skip — drop the address</option>
+              <option value="allow">Allow — send anyway</option>
+              <option value="skip">Skip — do not send without a verify result</option>
             </select>
           </div>
         </div>

@@ -174,8 +174,8 @@ rotation:
 validation:
   enabled: false
   timeout_seconds: 20
-  # allow = if every Stalwart API is down, still send
-  # skip  = if every Stalwart API is down, drop the address
+  # allow = timeout / API down / never reached RCPT TO → still send
+  # skip  = no verify result → drop (do not send)
   on_probe_error: allow
   servers: []
   # servers:
