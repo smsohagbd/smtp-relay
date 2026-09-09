@@ -193,16 +193,27 @@ validation:
   # Yahoo / AOL / ymail skip Stalwart (those MX always accept RCPT TO).
   # POST {"email":"..."} unless the URL contains {email}. Accepts
   # valid: true / validated: true / status: "valid". false = skip.
+  # Add as many endpoints as you want; recipients round-robin, errors fail over.
   yahoo:
     enabled: false
-    url: ""
-    # url: "https://verify.example.com/yahoo"
-    method: "POST"
-    api_key: ""
     extra_domains: []
     # extra_domains:
     #   - "yahoo.com.ph"
     concurrency: 5
+    endpoints: []
+    # endpoints:
+    #   - id: "yahoo1"
+    #     url: "http://127.0.0.1:6100/verify"
+    #     method: "POST"
+    #     api_key: ""
+    #   - id: "yahoo2"
+    #     url: "http://127.0.0.1:6101/verify"
+    #     method: "POST"
+    #     api_key: ""
+    # Legacy single-URL form still works:
+    # url: "https://verify.example.com/yahoo"
+    # method: "POST"
+    # api_key: ""
 
 queue:
   enabled: true

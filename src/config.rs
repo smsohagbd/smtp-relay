@@ -324,32 +324,54 @@ impl ValidationConfig {
     }
 
     pub fn has_any_channel(&self) -> bool {
-        self.usable().next().is_some() || self.yahoo_http().is_some()
+        self.usable().next().is_some() || !self.yahoo_endpoints().is_empty()
     }
 
-    /// Dedicated Yahoo channel, or a server card that is actually `POST /verify`.
-    pub fn yahoo_http(&self) -> Option<YahooValidationConfig> {
-        if self.yahoo.is_usable() {
-            return Some(self.yahoo.clone());
+    /// Every usable Yahoo / AOL verify API (dedicated endpoints + `/verify` cards).
+    pub fn yahoo_endpoints(&self) -> Vec<YahooEndpoint> {
+        let mut list = if self.yahoo.enabled {
+            self.yahoo.resolved_endpoints()
+        } else {
+            Vec::new()
+        };
+        for server in self
+            .servers
+            .iter()
+            .filter(|server| server.is_http_verifier() && !server.base_url.trim().is_empty())
+        {
+            let url = server.base_url.trim().to_string();
+            if list
+                .iter()
+                .any(|endpoint| endpoint.url.trim().eq_ignore_ascii_case(&url))
+            {
+                continue;
+            }
+            list.push(YahooEndpoint {
+                id: if server.id.trim().is_empty() {
+                    format!("yahoo{}", list.len() + 1)
+                } else {
+                    server.id.clone()
+                },
+                enabled: true,
+                url,
+                method: "POST".to_string(),
+                api_key: if !server.token.trim().is_empty() {
+                    server.token.clone()
+                } else {
+                    server.password.clone()
+                },
+            });
         }
-        let server = self.servers.iter().find(|server| {
-            server.is_http_verifier() && !server.base_url.trim().is_empty()
-        })?;
-        Some(YahooValidationConfig {
-            enabled: true,
-            url: server.base_url.trim().to_string(),
-            method: "POST".to_string(),
-            api_key: if !server.token.trim().is_empty() {
-                server.token.clone()
-            } else {
-                server.password.clone()
-            },
-            extra_domains: self.yahoo.extra_domains.clone(),
-            concurrency: self.yahoo.concurrency.max(1),
-        })
+        list
     }
 
-    /// Move `POST /verify` cards out of the Stalwart list into `yahoo`.
+    /// First Yahoo API, for Test and older single-URL callers.
+    pub fn yahoo_http(&self) -> Option<YahooValidationConfig> {
+        let endpoint = self.yahoo_endpoints().into_iter().next()?;
+        Some(endpoint.as_config(&self.yahoo))
+    }
+
+    /// Move `POST /verify` cards out of the Stalwart list into Yahoo endpoints.
     pub fn promote_http_verifier_cards(&mut self) {
         let mut keep = Vec::with_capacity(self.servers.len());
         for server in self.servers.drain(..) {
@@ -357,22 +379,34 @@ impl ValidationConfig {
                 keep.push(server);
                 continue;
             }
-            if !self.yahoo.is_usable() {
-                self.yahoo.enabled = true;
-                self.yahoo.url = server.base_url.trim().to_string();
-                if self.yahoo.method.trim().is_empty() {
-                    self.yahoo.method = "POST".to_string();
-                }
-                if self.yahoo.api_key.trim().is_empty() {
-                    self.yahoo.api_key = if !server.token.trim().is_empty() {
+            let url = server.base_url.trim().to_string();
+            let already = self
+                .yahoo
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.url.trim().eq_ignore_ascii_case(&url))
+                || self.yahoo.url.trim().eq_ignore_ascii_case(&url);
+            self.yahoo.enabled = true;
+            if !already {
+                self.yahoo.endpoints.push(YahooEndpoint {
+                    id: if server.id.trim().is_empty() {
+                        format!("yahoo{}", self.yahoo.endpoints.len() + 1)
+                    } else {
+                        server.id.clone()
+                    },
+                    enabled: true,
+                    url,
+                    method: "POST".to_string(),
+                    api_key: if !server.token.trim().is_empty() {
                         server.token
                     } else {
                         server.password
-                    };
-                }
+                    },
+                });
             }
         }
         self.servers = keep;
+        self.yahoo.normalize();
     }
 }
 
@@ -384,17 +418,56 @@ impl ValidationConfig {
 #[serde(default)]
 pub struct YahooValidationConfig {
     pub enabled: bool,
-    /// Full URL, e.g. `https://verify.example.com/yahoo`. `{email}` is replaced.
+    /// Legacy single URL. Prefer [`Self::endpoints`].
     pub url: String,
     /// `POST` (JSON body) or `GET` (email as query / path).
     pub method: String,
-    /// Optional bearer token / API key.
+    /// Optional bearer token / API key for the legacy single URL.
     pub api_key: String,
     /// Extra domains beyond the built-in Yahoo / AOL list.
     pub extra_domains: Vec<String>,
     /// Max Yahoo API calls in flight (Gmail/Stalwart checks are unlimited).
     #[serde(default = "default_yahoo_concurrency")]
     pub concurrency: u32,
+    /// One or more verify APIs. Recipients round-robin; errors fail over.
+    #[serde(default)]
+    pub endpoints: Vec<YahooEndpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YahooEndpoint {
+    pub id: String,
+    pub enabled: bool,
+    pub url: String,
+    pub method: String,
+    pub api_key: String,
+}
+
+impl Default for YahooEndpoint {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            enabled: true,
+            url: String::new(),
+            method: "POST".to_string(),
+            api_key: String::new(),
+        }
+    }
+}
+
+impl YahooEndpoint {
+    pub fn as_config(&self, parent: &YahooValidationConfig) -> YahooValidationConfig {
+        YahooValidationConfig {
+            enabled: true,
+            url: self.url.clone(),
+            method: self.method.clone(),
+            api_key: self.api_key.clone(),
+            extra_domains: parent.extra_domains.clone(),
+            concurrency: parent.concurrency.max(1),
+            endpoints: vec![self.clone()],
+        }
+    }
 }
 
 fn default_yahoo_concurrency() -> u32 {
@@ -410,13 +483,14 @@ impl Default for YahooValidationConfig {
             api_key: String::new(),
             extra_domains: Vec::new(),
             concurrency: default_yahoo_concurrency(),
+            endpoints: Vec::new(),
         }
     }
 }
 
 impl YahooValidationConfig {
     pub fn is_usable(&self) -> bool {
-        self.enabled && !self.url.trim().is_empty()
+        self.enabled && !self.resolved_endpoints().is_empty()
     }
 
     pub fn method(&self) -> &str {
@@ -424,6 +498,66 @@ impl YahooValidationConfig {
             "GET"
         } else {
             "POST"
+        }
+    }
+
+    pub fn resolved_endpoints(&self) -> Vec<YahooEndpoint> {
+        let mut out: Vec<YahooEndpoint> = self
+            .endpoints
+            .iter()
+            .filter(|endpoint| endpoint.enabled && !endpoint.url.trim().is_empty())
+            .cloned()
+            .collect();
+        if out.is_empty() && !self.url.trim().is_empty() {
+            out.push(YahooEndpoint {
+                id: "yahoo1".to_string(),
+                enabled: true,
+                url: self.url.trim().to_string(),
+                method: if self.method.trim().is_empty() {
+                    "POST".to_string()
+                } else {
+                    self.method.clone()
+                },
+                api_key: self.api_key.clone(),
+            });
+        }
+        out
+    }
+
+    pub fn normalize(&mut self) {
+        for (index, endpoint) in self.endpoints.iter_mut().enumerate() {
+            if endpoint.id.trim().is_empty() {
+                endpoint.id = format!("yahoo{}", index + 1);
+            }
+            endpoint.id = endpoint.id.trim().to_string();
+            endpoint.url = endpoint.url.trim().to_string();
+            endpoint.method = endpoint.method.trim().to_string();
+            if endpoint.method.is_empty() {
+                endpoint.method = "POST".to_string();
+            }
+        }
+        if self
+            .endpoints
+            .iter()
+            .all(|endpoint| endpoint.url.trim().is_empty())
+            && !self.url.trim().is_empty()
+        {
+            self.endpoints.push(YahooEndpoint {
+                id: "yahoo1".to_string(),
+                enabled: true,
+                url: self.url.trim().to_string(),
+                method: if self.method.trim().is_empty() {
+                    "POST".to_string()
+                } else {
+                    self.method.clone()
+                },
+                api_key: self.api_key.clone(),
+            });
+        }
+        if let Some(first) = self.resolved_endpoints().into_iter().next() {
+            self.url = first.url;
+            self.method = first.method;
+            self.api_key = first.api_key;
         }
     }
 }
@@ -1046,6 +1180,11 @@ impl Config {
         if !clone.validation.yahoo.api_key.is_empty() {
             clone.validation.yahoo.api_key = REDACTED.to_string();
         }
+        for endpoint in &mut clone.validation.yahoo.endpoints {
+            if !endpoint.api_key.is_empty() {
+                endpoint.api_key = REDACTED.to_string();
+            }
+        }
         clone
     }
 
@@ -1104,6 +1243,30 @@ impl Config {
         }
         if self.validation.yahoo.api_key == REDACTED {
             self.validation.yahoo.api_key = previous.validation.yahoo.api_key.clone();
+        }
+        for endpoint in &mut self.validation.yahoo.endpoints {
+            if endpoint.api_key != REDACTED {
+                continue;
+            }
+            if let Some(old) = previous
+                .validation
+                .yahoo
+                .endpoints
+                .iter()
+                .find(|entry| !endpoint.id.is_empty() && entry.id == endpoint.id)
+                .or_else(|| {
+                    previous
+                        .validation
+                        .yahoo
+                        .endpoints
+                        .iter()
+                        .find(|entry| !endpoint.url.is_empty() && entry.url == endpoint.url)
+                })
+            {
+                endpoint.api_key = old.api_key.clone();
+            } else if previous.validation.yahoo.api_key != REDACTED {
+                endpoint.api_key = previous.validation.yahoo.api_key.clone();
+            }
         }
     }
 
@@ -1334,16 +1497,19 @@ impl Config {
             ));
         }
         if self.validation.yahoo.enabled {
-            let url = self.validation.yahoo.url.trim();
-            if url.is_empty() {
+            let endpoints = self.validation.yahoo.resolved_endpoints();
+            if endpoints.is_empty() {
                 return Err(invalid(
-                    "validation.yahoo.enabled requires validation.yahoo.url".to_string(),
+                    "validation.yahoo.enabled requires at least one Yahoo API URL".to_string(),
                 ));
             }
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return Err(invalid(
-                    "validation.yahoo.url must start with http:// or https://".to_string(),
-                ));
+            for (index, endpoint) in endpoints.iter().enumerate() {
+                let url = endpoint.url.trim();
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return Err(invalid(format!(
+                        "validation.yahoo.endpoints[{index}].url must start with http:// or https://"
+                    )));
+                }
             }
         }
         let mut seen_validators = BTreeMap::new();
@@ -1671,6 +1837,63 @@ validation:
         assert!(validation.yahoo.is_usable());
         assert_eq!(validation.servers.len(), 1);
         assert_eq!(validation.servers[0].id, "sw1");
+        assert_eq!(validation.yahoo.endpoints.len(), 1);
+        assert_eq!(
+            validation.yahoo.endpoints[0].url,
+            "http://109.199.97.35:6100/verify"
+        );
+    }
+
+    #[test]
+    fn yahoo_promotes_every_verify_card() {
+        let mut validation = ValidationConfig::default();
+        validation.servers.push(ValidationServer {
+            id: "yahoo".into(),
+            base_url: "http://10.0.0.1:6100/verify".into(),
+            ..Default::default()
+        });
+        validation.servers.push(ValidationServer {
+            id: "yahoo2".into(),
+            base_url: "http://10.0.0.2:6100/verify".into(),
+            ..Default::default()
+        });
+        validation.promote_http_verifier_cards();
+        assert!(validation.yahoo.enabled);
+        assert_eq!(validation.yahoo.endpoints.len(), 2);
+        assert!(validation.servers.is_empty());
+        assert_eq!(validation.yahoo_endpoints().len(), 2);
+    }
+
+    #[test]
+    fn yahoo_keeps_every_verify_endpoint() {
+        let yaml = r#"
+relays:
+  - id: "one"
+    host: "smtp.one.com"
+    from_address: "noreply@one.com"
+validation:
+  enabled: true
+  yahoo:
+    enabled: true
+    endpoints:
+      - id: "y1"
+        url: "http://10.0.0.1:6100/verify"
+        api_key: "a"
+      - id: "y2"
+        url: "http://10.0.0.2:6100/verify"
+        api_key: "b"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("parses");
+        config.validate().expect("valid");
+        let endpoints = config.validation.yahoo_endpoints();
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints[0].id, "y1");
+        assert_eq!(endpoints[1].url, "http://10.0.0.2:6100/verify");
+        let mut redacted = config.redacted();
+        assert_eq!(redacted.validation.yahoo.endpoints[0].api_key, REDACTED);
+        redacted.restore_secrets_from(&config);
+        assert_eq!(redacted.validation.yahoo.endpoints[0].api_key, "a");
+        assert_eq!(redacted.validation.yahoo.endpoints[1].api_key, "b");
     }
 
     #[test]

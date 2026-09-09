@@ -432,7 +432,7 @@ fn status(state: &Arc<AppState>, request: &Request) -> Response {
                 "servers": config.validation.usable().count(),
                 "timeout_seconds": config.validation.timeout_seconds,
                 "on_probe_error": config.validation.on_probe_error,
-                "yahoo": config.validation.yahoo.enabled,
+                "yahoo": config.validation.yahoo_endpoints().len(),
             },
             "logging": {
                 "dump_inbound": config.logging.dump_inbound,
@@ -1516,6 +1516,8 @@ async fn yahoo_validation_test(state: &Arc<AppState>, request: &Request) -> Resp
     struct Body {
         email: String,
         #[serde(default)]
+        id: String,
+        #[serde(default)]
         url: String,
         #[serde(default)]
         method: String,
@@ -1526,27 +1528,38 @@ async fn yahoo_validation_test(state: &Arc<AppState>, request: &Request) -> Resp
         Ok(value) => value,
         Err(error) => return Response::error(400, &error),
     };
-    let saved = state
-        .config()
-        .validation
-        .yahoo_http()
-        .unwrap_or_else(|| state.config().validation.yahoo.clone());
+    let endpoints = state.config().validation.yahoo_endpoints();
+    let saved = endpoints
+        .iter()
+        .find(|endpoint| {
+            (!body.id.trim().is_empty() && endpoint.id == body.id.trim())
+                || (!body.url.trim().is_empty()
+                    && endpoint.url.trim().eq_ignore_ascii_case(body.url.trim()))
+        })
+        .or_else(|| endpoints.first());
     if body.url.trim().is_empty() {
-        body.url = saved.url.clone();
+        if let Some(endpoint) = saved {
+            body.url = endpoint.url.clone();
+        }
     }
     if body.method.trim().is_empty() {
-        body.method = saved.method.clone();
+        if let Some(endpoint) = saved {
+            body.method = endpoint.method.clone();
+        }
     }
     if body.api_key == REDACTED || body.api_key.trim().is_empty() {
-        body.api_key = saved.api_key.clone();
+        if let Some(endpoint) = saved {
+            body.api_key = endpoint.api_key.clone();
+        }
     }
     let yahoo = YahooValidationConfig {
         enabled: true,
         url: body.url.trim().to_string(),
         method: body.method,
         api_key: body.api_key,
-        extra_domains: saved.extra_domains,
-        concurrency: saved.concurrency,
+        extra_domains: state.config().validation.yahoo.extra_domains.clone(),
+        concurrency: state.config().validation.yahoo.concurrency,
+        endpoints: Vec::new(),
     };
     if !yahoo.url.starts_with("http://") && !yahoo.url.starts_with("https://") {
         return Response::json_value(
@@ -1605,6 +1618,7 @@ fn validation_put(state: &Arc<AppState>, request: &Request) -> Response {
         .map(|d| d.trim().to_ascii_lowercase())
         .filter(|d| !d.is_empty())
         .collect();
+    incoming.yahoo.normalize();
     match state.edit_config(should_persist(state, request), |config| {
         let previous = config.clone();
         config.validation = incoming.clone();

@@ -6,6 +6,7 @@
 //! some server reports `rcptToSuccess`. `rcptToError` means skip that
 //! address so it never hits the upstream SMTP pool.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +14,9 @@ use futures_util::StreamExt;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
-use crate::config::{ValidationConfig, ValidationServer, YahooValidationConfig};
+use crate::config::{ValidationConfig, ValidationServer, YahooEndpoint, YahooValidationConfig};
+
+static YAHOO_RR: AtomicUsize = AtomicUsize::new(0);
 
 const YAHOO_DOMAINS: &[&str] = &[
     "yahoo.com",
@@ -85,19 +88,16 @@ pub async fn filter_recipients(
 
     let timeout = Duration::from_secs(config.timeout_seconds.max(1));
     let client = http_client(timeout);
-    let yahoo_cfg = config.yahoo_http();
+    let yahoo_endpoints = config.yahoo_endpoints();
     let yahoo_slots = Arc::new(Semaphore::new(
-        yahoo_cfg
-            .as_ref()
-            .map(|yahoo| yahoo.concurrency.max(1).min(32) as usize)
-            .unwrap_or(5),
+        config.yahoo.concurrency.max(1).min(32) as usize,
     ));
     futures_util::future::join_all(recipients.iter().map(|address| {
         let client = &client;
         let yahoo_slots = yahoo_slots.clone();
-        let yahoo_cfg = yahoo_cfg.clone();
+        let yahoo_on = !yahoo_endpoints.is_empty();
         async move {
-            if yahoo_cfg.is_some() && is_yahoo_address(address, &config.yahoo.extra_domains) {
+            if yahoo_on && is_yahoo_address(address, &config.yahoo.extra_domains) {
                 let _permit = yahoo_slots.acquire().await.expect("yahoo semaphore");
             }
             check_recipient(client, config, address, timeout).await
@@ -113,8 +113,9 @@ async fn check_recipient(
     timeout: Duration,
 ) -> RecipientCheck {
     if is_yahoo_address(address, &config.yahoo.extra_domains) {
-        if let Some(yahoo) = config.yahoo_http() {
-            return check_yahoo(client, &yahoo, address, config.allow_on_probe_error()).await;
+        let endpoints = config.yahoo_endpoints();
+        if !endpoints.is_empty() {
+            return check_yahoo(client, &endpoints, address, config.allow_on_probe_error()).await;
         }
         if config.usable().next().is_none() {
             return RecipientCheck {
@@ -197,34 +198,64 @@ fn domain_matches(domain: &str, known: &str) -> bool {
     domain == known || domain.ends_with(&format!(".{known}"))
 }
 
+fn rotate_yahoo(endpoints: &[YahooEndpoint]) -> Vec<YahooEndpoint> {
+    if endpoints.len() <= 1 {
+        return endpoints.to_vec();
+    }
+    let start = YAHOO_RR.fetch_add(1, Ordering::Relaxed) % endpoints.len();
+    endpoints
+        .iter()
+        .cycle()
+        .skip(start)
+        .take(endpoints.len())
+        .cloned()
+        .collect()
+}
+
 async fn check_yahoo(
     client: &reqwest::Client,
-    yahoo: &YahooValidationConfig,
+    endpoints: &[YahooEndpoint],
     address: &str,
     allow_on_probe_error: bool,
 ) -> RecipientCheck {
-    match call_yahoo_api(client, yahoo, address).await {
-        Ok(outcome) => {
-            tracing::info!(
-                email = %address,
-                url = %yahoo.url,
-                validated = outcome.validated,
-                "yahoo verify"
-            );
-            RecipientCheck {
-                address: address.to_string(),
-                deliver: outcome.validated,
-                detail: outcome.detail,
+    let ordered = rotate_yahoo(endpoints);
+    let mut errors = Vec::new();
+    for endpoint in &ordered {
+        let yahoo = endpoint.as_config(&YahooValidationConfig {
+            concurrency: 1,
+            ..YahooValidationConfig::default()
+        });
+        match call_yahoo_api(client, &yahoo, address).await {
+            Ok(outcome) => {
+                tracing::info!(
+                    email = %address,
+                    id = %endpoint.id,
+                    url = %endpoint.url,
+                    validated = outcome.validated,
+                    "yahoo verify"
+                );
+                let detail = if endpoints.len() > 1 {
+                    format!("{} via `{}`", outcome.detail, endpoint.id)
+                } else {
+                    outcome.detail
+                };
+                return RecipientCheck {
+                    address: address.to_string(),
+                    deliver: outcome.validated,
+                    detail,
+                };
             }
+            Err(reason) => errors.push(format!("{}: {reason}", endpoint.id)),
         }
-        Err(reason) => RecipientCheck {
-            address: address.to_string(),
-            deliver: allow_on_probe_error,
-            detail: if allow_on_probe_error {
-                format!("yahoo API error, sending anyway ({reason})")
-            } else {
-                format!("yahoo API error, skipped ({reason})")
-            },
+    }
+    let joined = errors.join("; ");
+    RecipientCheck {
+        address: address.to_string(),
+        deliver: allow_on_probe_error,
+        detail: if allow_on_probe_error {
+            format!("yahoo API error, sending anyway ({joined})")
+        } else {
+            format!("yahoo API error, skipped ({joined})")
         },
     }
 }
