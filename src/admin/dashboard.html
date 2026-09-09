@@ -390,6 +390,51 @@
           </div>
         </div>
         <div id="validation-servers"></div>
+        <div class="template-card" style="margin-top:16px">
+          <strong style="display:block;margin-bottom:8px">Yahoo / AOL channel</strong>
+          <p style="color:var(--muted);margin:0 0 12px;font-size:12.5px">
+            Addresses ending in yahoo.com, ymail.com, rocketmail.com, aol.com
+            (and extra domains) skip Stalwart and call this API instead.
+            Expected JSON: <span class="mono">{"validated": true}</span> or
+            <span class="mono">{"validated": false}</span> — false skips the address.
+            POST body is <span class="mono">{"email":"..."}</span>. Put
+            <span class="mono">{email}</span> in the URL for GET.
+          </p>
+          <label class="inline" style="margin-bottom:10px">
+            <input type="checkbox" id="yahoo-enabled"> Enable Yahoo API
+          </label>
+          <div class="row" style="margin-bottom:8px">
+            <span>API URL</span>
+            <input type="text" id="yahoo-url" placeholder="https://verify.example.com/yahoo">
+          </div>
+          <div class="grid-2">
+            <div class="row">
+              <span>Method</span>
+              <select id="yahoo-method">
+                <option value="POST">POST JSON</option>
+                <option value="GET">GET</option>
+              </select>
+            </div>
+            <div class="row">
+              <span>API key (Bearer — optional)</span>
+              <input type="password" id="yahoo-api-key" autocomplete="new-password">
+            </div>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <span>Extra domains (comma-separated)</span>
+            <input type="text" id="yahoo-extra-domains" placeholder="yahoo.com.ph, myyahoo.test">
+          </div>
+          <div class="grid-2" style="margin-top:8px">
+            <div class="row">
+              <span>Test address</span>
+              <input type="text" id="yahoo-test-email" placeholder="name@yahoo.com">
+            </div>
+            <div class="row" style="justify-content:end">
+              <span>&nbsp;</span>
+              <button type="button" id="btn-test-yahoo">Test Yahoo API</button>
+            </div>
+          </div>
+        </div>
         <div class="err" id="validation-error" style="margin-top:8px"></div>
       </div>
     </div>
@@ -1330,6 +1375,14 @@ async function loadValidation() {
   $("validation-on-error").value = payload.on_probe_error === "skip" ? "skip" : "allow";
   $("btn-save-validation").disabled = payload.writable === false;
   $("btn-add-validator").disabled = payload.writable === false;
+  $("btn-test-yahoo").disabled = payload.writable === false;
+  $("yahoo-enabled").disabled = payload.writable === false;
+  const yahoo = payload.yahoo || {};
+  $("yahoo-enabled").checked = !!yahoo.enabled;
+  $("yahoo-url").value = yahoo.url || "";
+  $("yahoo-method").value = (yahoo.method || "POST").toUpperCase() === "GET" ? "GET" : "POST";
+  $("yahoo-api-key").value = yahoo.api_key || "";
+  $("yahoo-extra-domains").value = (yahoo.extra_domains || []).join(", ");
   validationServers = (payload.servers || []).map((server, index) => ({
     id: server.id || ("sw" + (index + 1)),
     base_url: server.base_url || "",
@@ -1373,6 +1426,13 @@ function collectValidation() {
     enabled: $("validation-enabled").checked,
     timeout_seconds: Number($("validation-timeout").value) || 20,
     on_probe_error: $("validation-on-error").value === "skip" ? "skip" : "allow",
+    yahoo: {
+      enabled: $("yahoo-enabled").checked,
+      url: $("yahoo-url").value.trim(),
+      method: $("yahoo-method").value,
+      api_key: $("yahoo-api-key").value,
+      extra_domains: $("yahoo-extra-domains").value.split(/[\s,]+/).map((d) => d.trim()).filter(Boolean),
+    },
     servers: Array.from($("validation-servers").querySelectorAll(".template-card")).map((card) => ({
       id: card.querySelector("[data-field=id]").value.trim(),
       base_url: card.querySelector("[data-field=base_url]").value.trim(),
@@ -1445,6 +1505,32 @@ $("btn-save-validation").onclick = async () => {
     toast("Address check saved", "ok");
     validationDrawn = false;
     await loadValidation();
+  } catch (error) {
+    $("validation-error").textContent = error.message;
+    toast(error.message, "bad");
+  }
+};
+
+$("btn-test-yahoo").onclick = async () => {
+  $("validation-error").textContent = "";
+  const yahoo = collectValidation().yahoo;
+  try {
+    const result = await api("/api/validation/yahoo-test", {
+      method: "POST",
+      body: JSON.stringify({
+        email: $("yahoo-test-email").value.trim(),
+        url: yahoo.url,
+        method: yahoo.method,
+        api_key: yahoo.api_key,
+      }),
+    });
+    if (result.ok) {
+      toast("Yahoo API: " + result.detail, result.validated ? "ok" : "bad");
+      if (!result.validated) $("validation-error").textContent = "validated: false — this address would be skipped";
+    } else {
+      $("validation-error").textContent = result.detail;
+      toast(result.detail, "bad");
+    }
   } catch (error) {
     $("validation-error").textContent = error.message;
     toast(error.message, "bad");

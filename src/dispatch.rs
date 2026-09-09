@@ -258,7 +258,7 @@ pub async fn attempt_delivery(
                 state,
                 message,
                 "validation".to_string(),
-                "all recipients failed the Stalwart delivery test".to_string(),
+                "all recipients failed address validation".to_string(),
             );
         }
         message.recipients = valid;

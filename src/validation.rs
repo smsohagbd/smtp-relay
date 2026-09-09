@@ -11,7 +11,30 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use serde_json::Value;
 
-use crate::config::{ValidationConfig, ValidationServer};
+use crate::config::{ValidationConfig, ValidationServer, YahooValidationConfig};
+
+const YAHOO_DOMAINS: &[&str] = &[
+    "yahoo.com",
+    "yahoo.co.uk",
+    "yahoo.co.in",
+    "yahoo.co.jp",
+    "yahoo.com.au",
+    "yahoo.com.br",
+    "yahoo.com.mx",
+    "yahoo.com.sg",
+    "yahoo.com.ar",
+    "yahoo.com.tw",
+    "yahoo.ca",
+    "yahoo.de",
+    "yahoo.fr",
+    "yahoo.it",
+    "yahoo.es",
+    "yahoo.in",
+    "ymail.com",
+    "rocketmail.com",
+    "aol.com",
+    "aim.com",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeOutcome {
@@ -30,12 +53,12 @@ pub struct RecipientCheck {
     pub detail: String,
 }
 
-/// Filters `recipients` to those the Stalwart probes will accept.
+/// Filters `recipients` to those the configured probes will accept.
 pub async fn filter_recipients(
     config: &ValidationConfig,
     recipients: &[String],
 ) -> Vec<RecipientCheck> {
-    if !config.enabled || config.usable().next().is_none() {
+    if !config.enabled || !config.has_any_channel() {
         return recipients
             .iter()
             .map(|address| RecipientCheck {
@@ -62,6 +85,42 @@ async fn check_recipient(
     address: &str,
     timeout: Duration,
 ) -> RecipientCheck {
+    if is_yahoo_address(address, &config.yahoo.extra_domains) {
+        if config.yahoo.is_usable() {
+            return check_yahoo(client, &config.yahoo, address, config.allow_on_probe_error())
+                .await;
+        }
+        if config.usable().next().is_none() {
+            return RecipientCheck {
+                address: address.to_string(),
+                deliver: config.allow_on_probe_error(),
+                detail: if config.allow_on_probe_error() {
+                    "yahoo address but Yahoo API is off, sending anyway".into()
+                } else {
+                    "yahoo address but Yahoo API is off, skipped".into()
+                },
+            };
+        }
+        // Yahoo API off: do not use Stalwart (it always accepts Yahoo).
+        return RecipientCheck {
+            address: address.to_string(),
+            deliver: config.allow_on_probe_error(),
+            detail: if config.allow_on_probe_error() {
+                "yahoo address, Stalwart skipped (catch-all), sending anyway".into()
+            } else {
+                "yahoo address, Stalwart skipped (catch-all), skipped".into()
+            },
+        };
+    }
+
+    if config.usable().next().is_none() {
+        return RecipientCheck {
+            address: address.to_string(),
+            deliver: true,
+            detail: "no Stalwart server configured".into(),
+        };
+    }
+
     let servers: Vec<_> = config.usable().cloned().collect();
     let mut tasks = Vec::with_capacity(servers.len());
     for server in servers {
@@ -84,6 +143,136 @@ async fn check_recipient(
     }
 
     decide(address, &outcomes, config.allow_on_probe_error())
+}
+
+/// True for yahoo.com, ymail.com, rocketmail.com, aol.com, and extra_domains.
+pub fn is_yahoo_address(address: &str, extra_domains: &[String]) -> bool {
+    let Some((_, domain)) = address.rsplit_once('@') else {
+        return false;
+    };
+    let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty() {
+        return false;
+    }
+    YAHOO_DOMAINS.iter().any(|known| domain_matches(&domain, known))
+        || extra_domains
+            .iter()
+            .any(|known| domain_matches(&domain, known.trim().to_ascii_lowercase().as_str()))
+}
+
+fn domain_matches(domain: &str, known: &str) -> bool {
+    let known = known.trim().trim_start_matches('.').to_ascii_lowercase();
+    if known.is_empty() {
+        return false;
+    }
+    domain == known || domain.ends_with(&format!(".{known}"))
+}
+
+async fn check_yahoo(
+    client: &reqwest::Client,
+    yahoo: &YahooValidationConfig,
+    address: &str,
+    allow_on_probe_error: bool,
+) -> RecipientCheck {
+    match call_yahoo_api(client, yahoo, address).await {
+        Ok(true) => RecipientCheck {
+            address: address.to_string(),
+            deliver: true,
+            detail: "yahoo API validated: true".into(),
+        },
+        Ok(false) => RecipientCheck {
+            address: address.to_string(),
+            deliver: false,
+            detail: "yahoo API validated: false".into(),
+        },
+        Err(reason) => RecipientCheck {
+            address: address.to_string(),
+            deliver: allow_on_probe_error,
+            detail: if allow_on_probe_error {
+                format!("yahoo API error, sending anyway ({reason})")
+            } else {
+                format!("yahoo API error, skipped ({reason})")
+            },
+        },
+    }
+}
+
+/// Calls the Yahoo verifier. Returns `Ok(true/false)` from `validated`.
+pub async fn call_yahoo_api(
+    client: &reqwest::Client,
+    yahoo: &YahooValidationConfig,
+    address: &str,
+) -> Result<bool, String> {
+    let url = yahoo_request_url(&yahoo.url, address);
+    let mut request = if yahoo.method() == "GET" {
+        client.get(&url)
+    } else {
+        client
+            .post(&url)
+            .json(&serde_json::json!({ "email": address }))
+    };
+    request = request.header("Accept", "application/json");
+    if !yahoo.api_key.trim().is_empty() {
+        request = request.bearer_auth(yahoo.api_key.trim());
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("could not reach Yahoo API: {error}"))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "HTTP {status} {}",
+            body.chars().take(180).collect::<String>()
+        ));
+    }
+    let value: Value = serde_json::from_str(&body)
+        .map_err(|error| format!("Yahoo API did not return JSON: {error}"))?;
+    read_validated(&value).ok_or_else(|| {
+        format!(
+            "Yahoo API JSON has no `validated` field: {}",
+            body.chars().take(180).collect::<String>()
+        )
+    })
+}
+
+fn yahoo_request_url(template: &str, address: &str) -> String {
+    let base = template.trim();
+    if base.contains("{email}") {
+        return base.replace("{email}", &encode_path(address));
+    }
+    base.trim_end_matches('/').to_string()
+}
+
+fn read_validated(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(flag) => Some(*flag),
+        Value::Object(map) => {
+            for key in ["validated", "valid", "is_valid", "Valid", "Validated"] {
+                if let Some(found) = map.get(key).and_then(json_bool) {
+                    return Some(found);
+                }
+            }
+            map.values().find_map(read_validated)
+        }
+        Value::Array(items) => items.iter().find_map(read_validated),
+        _ => None,
+    }
+}
+
+fn json_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(flag) => Some(*flag),
+        Value::Number(n) => n.as_i64().map(|n| n != 0),
+        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "1" | "valid" | "ok" => Some(true),
+            "false" | "no" | "0" | "invalid" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn decide(address: &str, outcomes: &[ProbeOutcome], allow_on_probe_error: bool) -> RecipientCheck {
@@ -492,6 +681,53 @@ event: event\ndata: [{\"type\":\"rcptToSuccess\",\"elapsed\":9}]\n\n"
         assert_eq!(
             delivery_url("https://mail.example.com/", "a+b@x.io", 20),
             "https://mail.example.com/api/live/delivery/a%2Bb%40x.io?timeout=20"
+        );
+    }
+
+    #[test]
+    fn yahoo_domains_are_routed_separately() {
+        assert!(is_yahoo_address("lead@yahoo.com", &[]));
+        assert!(is_yahoo_address("Lead@Yahoo.CO.UK", &[]));
+        assert!(is_yahoo_address("x@ymail.com", &[]));
+        assert!(is_yahoo_address("x@rocketmail.com", &[]));
+        assert!(is_yahoo_address("x@aol.com", &[]));
+        assert!(is_yahoo_address("x@mail.yahoo.com", &[]));
+        assert!(!is_yahoo_address("lead@gmail.com", &[]));
+        assert!(is_yahoo_address(
+            "x@custom-yahoo.test",
+            &["custom-yahoo.test".into()]
+        ));
+    }
+
+    #[test]
+    fn yahoo_json_reads_validated_true_false() {
+        assert_eq!(
+            read_validated(&serde_json::json!({ "validated": true })),
+            Some(true)
+        );
+        assert_eq!(
+            read_validated(&serde_json::json!({ "validated": "False" })),
+            Some(false)
+        );
+        assert_eq!(
+            read_validated(&serde_json::json!({ "data": { "validated": true } })),
+            Some(true)
+        );
+        assert_eq!(
+            read_validated(&serde_json::json!({ "ok": 1 })),
+            None
+        );
+    }
+
+    #[test]
+    fn yahoo_url_substitutes_email() {
+        assert_eq!(
+            yahoo_request_url("https://api.example.com/v?email={email}", "a@yahoo.com"),
+            "https://api.example.com/v?email=a%40yahoo.com"
+        );
+        assert_eq!(
+            yahoo_request_url("https://api.example.com/check/", "a@yahoo.com"),
+            "https://api.example.com/check"
         );
     }
 }

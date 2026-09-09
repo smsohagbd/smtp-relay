@@ -296,6 +296,8 @@ pub struct ValidationConfig {
     /// If every Stalwart API is unreachable, still send (`allow`) or skip (`skip`).
     pub on_probe_error: ProbeErrorPolicy,
     pub servers: Vec<ValidationServer>,
+    /// Yahoo / AOL / ymail addresses skip Stalwart and hit this HTTP API.
+    pub yahoo: YahooValidationConfig,
 }
 
 impl Default for ValidationConfig {
@@ -305,6 +307,7 @@ impl Default for ValidationConfig {
             timeout_seconds: 20,
             on_probe_error: ProbeErrorPolicy::Allow,
             servers: Vec::new(),
+            yahoo: YahooValidationConfig::default(),
         }
     }
 }
@@ -316,6 +319,54 @@ impl ValidationConfig {
 
     pub fn allow_on_probe_error(&self) -> bool {
         matches!(self.on_probe_error, ProbeErrorPolicy::Allow)
+    }
+
+    pub fn has_any_channel(&self) -> bool {
+        self.usable().next().is_some() || self.yahoo.is_usable()
+    }
+}
+
+/// HTTP verifier used only for Yahoo-family domains.
+///
+/// Expected JSON: `{ "validated": true }` or `{ "validated": false }`.
+/// POST body is `{ "email": "user@yahoo.com" }` unless the URL contains `{email}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YahooValidationConfig {
+    pub enabled: bool,
+    /// Full URL, e.g. `https://verify.example.com/yahoo`. `{email}` is replaced.
+    pub url: String,
+    /// `POST` (JSON body) or `GET` (email as query / path).
+    pub method: String,
+    /// Optional bearer token / API key.
+    pub api_key: String,
+    /// Extra domains beyond the built-in Yahoo list (one per line in the UI).
+    pub extra_domains: Vec<String>,
+}
+
+impl Default for YahooValidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            method: "POST".to_string(),
+            api_key: String::new(),
+            extra_domains: Vec::new(),
+        }
+    }
+}
+
+impl YahooValidationConfig {
+    pub fn is_usable(&self) -> bool {
+        self.enabled && !self.url.trim().is_empty()
+    }
+
+    pub fn method(&self) -> &str {
+        if self.method.trim().eq_ignore_ascii_case("get") {
+            "GET"
+        } else {
+            "POST"
+        }
     }
 }
 
@@ -924,6 +975,9 @@ impl Config {
                 server.token = REDACTED.to_string();
             }
         }
+        if !clone.validation.yahoo.api_key.is_empty() {
+            clone.validation.yahoo.api_key = REDACTED.to_string();
+        }
         clone
     }
 
@@ -979,6 +1033,9 @@ impl Config {
             if server.token == REDACTED {
                 server.token = old.token.clone();
             }
+        }
+        if self.validation.yahoo.api_key == REDACTED {
+            self.validation.yahoo.api_key = previous.validation.yahoo.api_key.clone();
         }
     }
 
@@ -1203,11 +1260,23 @@ impl Config {
                 "validation.timeout_seconds must be at least 1".to_string(),
             ));
         }
-        if self.validation.enabled && self.validation.usable().next().is_none() {
+        if self.validation.enabled && !self.validation.has_any_channel() {
             return Err(invalid(
-                "validation.enabled requires at least one Stalwart server with a base_url"
-                    .to_string(),
+                "validation.enabled requires a Stalwart server or a Yahoo API URL".to_string(),
             ));
+        }
+        if self.validation.yahoo.enabled {
+            let url = self.validation.yahoo.url.trim();
+            if url.is_empty() {
+                return Err(invalid(
+                    "validation.yahoo.enabled requires validation.yahoo.url".to_string(),
+                ));
+            }
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err(invalid(
+                    "validation.yahoo.url must start with http:// or https://".to_string(),
+                ));
+            }
         }
         let mut seen_validators = BTreeMap::new();
         for (index, server) in self.validation.servers.iter().enumerate() {
@@ -1438,6 +1507,34 @@ validation:
         assert_eq!(config.validation.timeout_seconds, 15);
         assert_eq!(config.validation.on_probe_error, ProbeErrorPolicy::Skip);
         assert_eq!(config.validation.servers[0].base_url, "https://mail1.example.com");
+        assert!(!config.validation.yahoo.enabled);
+    }
+
+    #[test]
+    fn yahoo_validation_parses() {
+        let yaml = r#"
+relays:
+  - id: "one"
+    host: "smtp.one.com"
+    from_address: "noreply@one.com"
+validation:
+  enabled: true
+  yahoo:
+    enabled: true
+    url: "https://verify.example.com/yahoo"
+    method: "POST"
+    api_key: "secret-key"
+    extra_domains:
+      - "yahoo.com.ph"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("parses");
+        config.validate().expect("valid");
+        assert!(config.validation.yahoo.is_usable());
+        assert_eq!(config.validation.yahoo.api_key, "secret-key");
+        let mut redacted = config.redacted();
+        assert_eq!(redacted.validation.yahoo.api_key, REDACTED);
+        redacted.restore_secrets_from(&config);
+        assert_eq!(redacted.validation.yahoo.api_key, "secret-key");
     }
 
     #[test]

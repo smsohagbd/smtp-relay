@@ -190,6 +190,19 @@ validation:
   #     password: "secret"
   #     token: ""
 
+  # Yahoo / AOL / ymail skip Stalwart (those MX always accept RCPT TO).
+  # POST {"email":"..."} unless the URL contains {email}. JSON must include
+  # validated: true or validated: false. false = skip that recipient.
+  yahoo:
+    enabled: false
+    url: ""
+    # url: "https://verify.example.com/yahoo"
+    method: "POST"
+    api_key: ""
+    extra_domains: []
+    # extra_domains:
+    #   - "yahoo.com.ph"
+
 queue:
   enabled: true
 

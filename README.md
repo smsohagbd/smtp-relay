@@ -41,7 +41,8 @@ newsletters, custom scripts. No plugin and no vendor lock-in.
   configured Stalwart server in parallel (`GET /api/live/delivery/{email}`,
   the same Email Delivery test as Manage → Troubleshoot). `rcptToSuccess`
   sends the message; `rcptToError` skips that address so it never hits the
-  relay pool. Configure it on the **Address check** tab.
+  relay pool. Yahoo / AOL / ymail skip Stalwart and call a separate HTTP API
+  (`validated: true` sends, `false` skips). Configure both on **Address check**.
 - Automatic retry if a provider fails; circuit breaker skips a dead account
 - Web UI: add, clone, bulk-import, test, pause, or delete providers
 - Disk mail log like Postfix/Exim: `/var/log/smtp-relay/maillog`

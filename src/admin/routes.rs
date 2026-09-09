@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::admin::http::{HandlerFuture, Reply, Request, Response};
 use crate::config::{
     AuthConfig, Config, RelayConfig, RotationConfig, StickyMode, Strategy, TlsMode,
-    ValidationConfig, ValidationServer, REDACTED,
+    ValidationConfig, ValidationServer, YahooValidationConfig, REDACTED,
 };
 use crate::events::EventKind;
 use crate::metrics::{MessageStatus, RelayMetricsRow};
@@ -138,6 +138,9 @@ async fn route(state: Arc<AppState>, request: Request) -> Reply {
         ("PUT", ["api", "validation"]) => validation_put(&state, &request).into(),
         ("POST", ["api", "validation", "test"]) => {
             validation_test(&state, &request).await.into()
+        }
+        ("POST", ["api", "validation", "yahoo-test"]) => {
+            yahoo_validation_test(&state, &request).await.into()
         }
         ("GET", ["api", "debug", "inbound"]) => inbound_debug_get(&state).into(),
         ("PUT", ["api", "debug", "inbound"]) => inbound_debug_put(&state, &request).into(),
@@ -429,6 +432,7 @@ fn status(state: &Arc<AppState>, request: &Request) -> Response {
                 "servers": config.validation.usable().count(),
                 "timeout_seconds": config.validation.timeout_seconds,
                 "on_probe_error": config.validation.on_probe_error,
+                "yahoo": config.validation.yahoo.enabled,
             },
             "logging": {
                 "dump_inbound": config.logging.dump_inbound,
@@ -1442,6 +1446,7 @@ fn validation_get(state: &Arc<AppState>) -> Response {
             "timeout_seconds": redacted.validation.timeout_seconds,
             "on_probe_error": redacted.validation.on_probe_error,
             "servers": redacted.validation.servers,
+            "yahoo": redacted.validation.yahoo,
             "writable": config.admin.allow_config_write,
         }),
     )
@@ -1494,6 +1499,69 @@ async fn validation_test(state: &Arc<AppState>, request: &Request) -> Response {
     }
 }
 
+async fn yahoo_validation_test(state: &Arc<AppState>, request: &Request) -> Response {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        email: String,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        method: String,
+        #[serde(default)]
+        api_key: String,
+    }
+    let mut body: Body = match request.body_json() {
+        Ok(value) => value,
+        Err(error) => return Response::error(400, &error),
+    };
+    let saved = state.config().validation.yahoo.clone();
+    if body.url.trim().is_empty() {
+        body.url = saved.url.clone();
+    }
+    if body.method.trim().is_empty() {
+        body.method = saved.method.clone();
+    }
+    if body.api_key == REDACTED || body.api_key.trim().is_empty() {
+        body.api_key = saved.api_key.clone();
+    }
+    let yahoo = YahooValidationConfig {
+        enabled: true,
+        url: body.url.trim().to_string(),
+        method: body.method,
+        api_key: body.api_key,
+        extra_domains: saved.extra_domains,
+    };
+    if !yahoo.url.starts_with("http://") && !yahoo.url.starts_with("https://") {
+        return Response::json_value(
+            200,
+            &json!({ "ok": false, "detail": "enter the Yahoo API URL" }),
+        );
+    }
+    let email = body.email.trim();
+    if email.is_empty() || !email.contains('@') {
+        return Response::json_value(
+            200,
+            &json!({ "ok": false, "detail": "enter an email to test" }),
+        );
+    }
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    match crate::validation::call_yahoo_api(&client, &yahoo, email).await {
+        Ok(validated) => Response::json_value(
+            200,
+            &json!({
+                "ok": true,
+                "validated": validated,
+                "detail": format!("validated: {validated}"),
+            }),
+        ),
+        Err(detail) => Response::json_value(200, &json!({ "ok": false, "detail": detail })),
+    }
+}
+
 fn validation_put(state: &Arc<AppState>, request: &Request) -> Response {
     if !state.config().admin.allow_config_write {
         return Response::error(403, "admin.allow_config_write is disabled");
@@ -1511,6 +1579,15 @@ fn validation_put(state: &Arc<AppState>, request: &Request) -> Response {
         server.username = server.username.trim().to_string();
         server.token = server.token.trim().to_string();
     }
+    incoming.yahoo.url = incoming.yahoo.url.trim().to_string();
+    incoming.yahoo.method = incoming.yahoo.method.trim().to_string();
+    incoming.yahoo.extra_domains = incoming
+        .yahoo
+        .extra_domains
+        .iter()
+        .map(|d| d.trim().to_ascii_lowercase())
+        .filter(|d| !d.is_empty())
+        .collect();
     match state.edit_config(should_persist(state, request), |config| {
         let previous = config.clone();
         config.validation = incoming.clone();
@@ -1531,6 +1608,7 @@ fn validation_put(state: &Arc<AppState>, request: &Request) -> Response {
                     "timeout_seconds": saved.timeout_seconds,
                     "on_probe_error": saved.on_probe_error,
                     "servers": saved.servers,
+                    "yahoo": saved.yahoo,
                 }),
             )
         }
