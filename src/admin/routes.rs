@@ -11,7 +11,8 @@ use serde_json::{json, Value};
 
 use crate::admin::http::{HandlerFuture, Reply, Request, Response};
 use crate::config::{
-    AuthConfig, Config, RelayConfig, RotationConfig, StickyMode, Strategy, TlsMode, ValidationConfig,
+    AuthConfig, Config, RelayConfig, RotationConfig, StickyMode, Strategy, TlsMode,
+    ValidationConfig, ValidationServer, REDACTED,
 };
 use crate::events::EventKind;
 use crate::metrics::{MessageStatus, RelayMetricsRow};
@@ -135,6 +136,9 @@ async fn route(state: Arc<AppState>, request: Request) -> Reply {
         ("PUT", ["api", "rotation"]) => rotation_put(&state, &request).into(),
         ("GET", ["api", "validation"]) => validation_get(&state).into(),
         ("PUT", ["api", "validation"]) => validation_put(&state, &request).into(),
+        ("POST", ["api", "validation", "test"]) => {
+            validation_test(&state, &request).await.into()
+        }
         ("GET", ["api", "debug", "inbound"]) => inbound_debug_get(&state).into(),
         ("PUT", ["api", "debug", "inbound"]) => inbound_debug_put(&state, &request).into(),
 
@@ -1441,6 +1445,53 @@ fn validation_get(state: &Arc<AppState>) -> Response {
             "writable": config.admin.allow_config_write,
         }),
     )
+}
+
+async fn validation_test(state: &Arc<AppState>, request: &Request) -> Response {
+    let mut server: ValidationServer = match request.body_json() {
+        Ok(value) => value,
+        Err(error) => return Response::error(400, &error),
+    };
+    server.base_url = server.base_url.trim().trim_end_matches('/').to_string();
+    server.username = server.username.trim().to_string();
+    server.token = server.token.trim().to_string();
+    if let Some(saved) = state
+        .config()
+        .validation
+        .servers
+        .iter()
+        .find(|entry| !server.id.is_empty() && entry.id == server.id)
+    {
+        if server.password == REDACTED {
+            server.password = saved.password.clone();
+        }
+        if server.token == REDACTED {
+            server.token = saved.token.clone();
+        }
+    } else if server.password == REDACTED || server.token == REDACTED {
+        return Response::error(400, "enter the password again before testing a new server");
+    }
+
+    match crate::validation::verify_credentials(&server).await {
+        Ok(detail) => Response::json_value(
+            200,
+            &json!({
+                "ok": true,
+                "id": server.id,
+                "base_url": server.base_url,
+                "detail": detail,
+            }),
+        ),
+        Err(detail) => Response::json_value(
+            200,
+            &json!({
+                "ok": false,
+                "id": server.id,
+                "base_url": server.base_url,
+                "detail": detail,
+            }),
+        ),
+    }
 }
 
 fn validation_put(state: &Arc<AppState>, request: &Request) -> Response {

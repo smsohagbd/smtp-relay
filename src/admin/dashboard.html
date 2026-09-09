@@ -368,10 +368,11 @@
           Email Delivery test as Manage → Troubleshoot).
           <strong>rcptToSuccess</strong> sends the address;
           <strong>rcptToError</strong> skips it so invalid mailboxes never reach
-          the paid pool.
+          the paid pool. DANE/TLSA warnings (like Bogus TLSA) are ignored —
+          they are not a mailbox verdict.
           Use the same <strong>admin username and password</strong> you use to
-          open the Stalwart web UI. Leave the token field empty — you do not
-          create a token.
+          open the Stalwart web UI, then click <strong>Test login</strong>.
+          Leave the token field empty.
         </p>
         <div class="grid-2" style="margin-bottom:12px">
           <div class="row">
@@ -379,7 +380,7 @@
             <input type="number" id="validation-timeout" min="1" max="120" value="20">
           </div>
           <div class="row">
-            <span>If every API is down</span>
+            <span>If the test never reaches RCPT TO</span>
             <select id="validation-on-error">
               <option value="allow">Allow — still send</option>
               <option value="skip">Skip — drop the address</option>
@@ -1332,6 +1333,7 @@ function renderValidation() {
         <input type="password" data-field="token" value="${escapeHtml(server.token)}" autocomplete="new-password">
       </div>
       <div class="actions" style="border:0;padding:8px 0 0">
+        <button class="tiny" data-test-validator="${index}">Test login</button>
         <div class="spacer"></div>
         <button class="tiny danger" data-remove-validator="${index}">Remove</button>
       </div>
@@ -1362,7 +1364,32 @@ $("btn-add-validator").onclick = () => {
   renderValidation();
 };
 
-$("validation-servers").addEventListener("click", (event) => {
+$("validation-servers").addEventListener("click", async (event) => {
+  const test = event.target.closest("[data-test-validator]");
+  if (test) {
+    const index = Number(test.dataset.testValidator);
+    const server = collectValidation().servers[index];
+    $("validation-error").textContent = "";
+    test.disabled = true;
+    try {
+      const result = await api("/api/validation/test", {
+        method: "POST",
+        body: JSON.stringify(server),
+      });
+      if (result.ok) {
+        toast(server.id + ": " + result.detail, "ok");
+      } else {
+        $("validation-error").textContent = (server.id || "server") + ": " + result.detail;
+        toast(result.detail, "bad");
+      }
+    } catch (error) {
+      $("validation-error").textContent = error.message;
+      toast(error.message, "bad");
+    } finally {
+      test.disabled = false;
+    }
+    return;
+  }
   const button = event.target.closest("[data-remove-validator]");
   if (!button) return;
   const current = collectValidation();
@@ -1375,8 +1402,20 @@ $("validation-servers").addEventListener("click", (event) => {
 
 $("btn-save-validation").onclick = async () => {
   $("validation-error").textContent = "";
+  const payload = collectValidation();
   try {
-    await api("/api/validation", { method: "PUT", body: JSON.stringify(collectValidation()) });
+    for (const server of payload.servers.filter((entry) => entry.base_url)) {
+      const result = await api("/api/validation/test", {
+        method: "POST",
+        body: JSON.stringify(server),
+      });
+      if (!result.ok) {
+        $("validation-error").textContent = (server.id || "server") + ": " + result.detail;
+        toast(result.detail, "bad");
+        return;
+      }
+    }
+    await api("/api/validation", { method: "PUT", body: JSON.stringify(payload) });
     toast("Address check saved", "ok");
     validationDrawn = false;
     await loadValidation();

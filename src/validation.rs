@@ -136,17 +136,13 @@ async fn probe_server(
     timeout: Duration,
 ) -> ProbeOutcome {
     let url = delivery_url(&server.base_url, address, timeout.as_secs());
-    let request = client
-        .get(&url)
-        .header("Accept", "text/event-stream")
-        .header("Cache-Control", "no-cache");
-    let request = if !server.token.trim().is_empty() {
-        request.bearer_auth(server.token.trim())
-    } else if !server.username.trim().is_empty() {
-        request.basic_auth(server.username.trim(), Some(server.password.as_str()))
-    } else {
-        request
-    };
+    let request = authorize(
+        client
+            .get(&url)
+            .header("Accept", "text/event-stream")
+            .header("Cache-Control", "no-cache"),
+        server,
+    );
 
     let response = match request.send().await {
         Ok(response) => response,
@@ -161,13 +157,19 @@ async fn probe_server(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        let reason = match status.as_u16() {
+            401 => "wrong username or password".into(),
+            403 => "account lacks LiveDeliveryTest permission".into(),
+            _ => format!("HTTP {status} {}", body.chars().take(180).collect::<String>()),
+        };
         return ProbeOutcome::ProbeFailed {
             server: server.id.clone(),
-            reason: format!("HTTP {status} {}", body.chars().take(180).collect::<String>()),
+            reason,
         };
     }
 
     let mut leftover = String::new();
+    let mut last_hint = String::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let bytes = match chunk {
@@ -193,26 +195,75 @@ async fn probe_server(
                         reason,
                     };
                 }
-                StageClass::ProbeFailed(reason) => {
-                    return ProbeOutcome::ProbeFailed {
-                        server: server.id.clone(),
-                        reason,
-                    };
-                }
                 StageClass::Done => {
                     return ProbeOutcome::ProbeFailed {
                         server: server.id.clone(),
-                        reason: "completed without rcptToSuccess".into(),
+                        reason: if last_hint.is_empty() {
+                            "completed without RCPT TO".into()
+                        } else {
+                            format!("completed without RCPT TO ({last_hint})")
+                        },
                     };
                 }
-                StageClass::Continue => {}
+                StageClass::Continue => {
+                    if let Some(hint) = stage_error_hint(&stage) {
+                        last_hint = hint;
+                    }
+                }
             }
         }
     }
 
     ProbeOutcome::ProbeFailed {
         server: server.id.clone(),
-        reason: "delivery stream ended without a verdict".into(),
+        reason: if last_hint.is_empty() {
+            "delivery stream ended without a verdict".into()
+        } else {
+            format!("stream ended without RCPT TO ({last_hint})")
+        },
+    }
+}
+
+/// Confirms Stalwart admin credentials and `LiveDeliveryTest` permission.
+pub async fn verify_credentials(server: &ValidationServer) -> Result<String, String> {
+    let base = server.base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err("base URL is empty".into());
+    }
+    if !(base.starts_with("http://") || base.starts_with("https://")) {
+        return Err("base URL must start with http:// or https://".into());
+    }
+    if server.token.trim().is_empty() && server.username.trim().is_empty() {
+        return Err("enter the Stalwart admin username and password".into());
+    }
+
+    let client = http_client(Duration::from_secs(12));
+    let url = format!("{base}/api/token/delivery");
+    let request = authorize(client.get(&url), server);
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("could not reach {base}: {error}"))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let snippet = body.chars().take(180).collect::<String>();
+
+    match status.as_u16() {
+        200 => Ok("login ok — LiveDeliveryTest permission is present".into()),
+        401 => Err("wrong username or password".into()),
+        403 => Err("logged in, but this account lacks LiveDeliveryTest permission".into()),
+        404 => Err("this Stalwart build has no /api/token/delivery endpoint".into()),
+        other => Err(format!("HTTP {other} {snippet}")),
+    }
+}
+
+fn authorize(request: reqwest::RequestBuilder, server: &ValidationServer) -> reqwest::RequestBuilder {
+    if !server.token.trim().is_empty() {
+        request.bearer_auth(server.token.trim())
+    } else if !server.username.trim().is_empty() {
+        request.basic_auth(server.username.trim(), Some(server.password.as_str()))
+    } else {
+        request
     }
 }
 
@@ -220,7 +271,6 @@ async fn probe_server(
 enum StageClass {
     Acceptable,
     InvalidMailbox(String),
-    ProbeFailed(String),
     Done,
     Continue,
 }
@@ -233,14 +283,22 @@ fn classify_stage(stage: &Value) -> StageClass {
         .unwrap_or(typ)
         .to_string();
     match typ {
+        // Only RCPT TO is a mailbox verdict. TLSA/DANE/MTA-STS errors are
+        // path noise — Stalwart still continues to SMTP after "Bogus TLSA".
         "rcptToSuccess" => StageClass::Acceptable,
         "rcptToError" => StageClass::InvalidMailbox(reason),
         "completed" => StageClass::Done,
-        other if other.ends_with("Error") || other.ends_with("Failed") => {
-            StageClass::ProbeFailed(reason)
-        }
         _ => StageClass::Continue,
     }
+}
+
+fn stage_error_hint(stage: &Value) -> Option<String> {
+    let typ = stage.get("type").and_then(Value::as_str)?;
+    if !(typ.ends_with("Error") || typ.ends_with("Failed")) {
+        return None;
+    }
+    let reason = stage.get("reason").and_then(Value::as_str).unwrap_or(typ);
+    Some(format!("{typ}: {reason}"))
 }
 
 fn take_sse_stages(buffer: &mut String) -> Vec<Value> {
@@ -320,6 +378,22 @@ event: event\ndata: [{\"type\":\"rcptToSuccess\",\"elapsed\":9}]\n\n"
         assert_eq!(
             classify_stage(&stage_reason("rcptToError", "550 5.1.1 user unknown")),
             StageClass::InvalidMailbox("550 5.1.1 user unknown".into())
+        );
+    }
+
+    #[test]
+    fn tlsa_and_dane_errors_are_not_mailbox_verdicts() {
+        assert_eq!(
+            classify_stage(&stage_reason("tlsaLookupError", "Bogus TLSA record")),
+            StageClass::Continue
+        );
+        assert_eq!(
+            classify_stage(&stage_reason("daneVerifyError", "no match")),
+            StageClass::Continue
+        );
+        assert_eq!(
+            classify_stage(&stage_reason("connectionError", "refused")),
+            StageClass::Continue
         );
     }
 
