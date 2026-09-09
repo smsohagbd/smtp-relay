@@ -375,6 +375,9 @@
           Use the same <strong>admin username and password</strong> you use to
           open the Stalwart web UI, then click <strong>Test login</strong>.
           Leave the token field empty.
+          <strong>Yahoo / AOL must use the Yahoo box below</strong>
+          (<span class="mono">POST /verify</span>) — putting that URL in a
+          Stalwart card never calls your API and mail still goes out.
         </p>
         <div class="grid-2" style="margin-bottom:12px">
           <div class="row">
@@ -389,12 +392,12 @@
             </select>
           </div>
         </div>
-        <div id="validation-servers"></div>
-        <div class="template-card" style="margin-top:16px">
+        <div class="template-card" style="margin-bottom:16px">
           <strong style="display:block;margin-bottom:8px">Yahoo / AOL channel — not a Stalwart server</strong>
           <p style="color:var(--muted);margin:0 0 12px;font-size:12.5px">
-            Do not add this as a Stalwart card above. Yahoo only needs
+            Do not add this as a Stalwart card. Yahoo only needs
             <strong>API URL + token</strong> (username/password stay empty).
+            Example: <span class="mono">http://127.0.0.1:6100/verify</span>.
             Accepts <span class="mono">validate: true</span>,
             <span class="mono">valid: true</span>, or
             <span class="mono">validated: true</span>.
@@ -407,7 +410,7 @@
           </label>
           <div class="row" style="margin-bottom:8px">
             <span>API URL</span>
-            <input type="text" id="yahoo-url" placeholder="https://verify.example.com/yahoo">
+            <input type="text" id="yahoo-url" placeholder="http://127.0.0.1:6100/verify">
           </div>
           <div class="grid-2">
             <div class="row">
@@ -437,6 +440,7 @@
             </div>
           </div>
         </div>
+        <div id="validation-servers"></div>
         <div class="err" id="validation-error" style="margin-top:8px"></div>
       </div>
     </div>
@@ -1385,17 +1389,33 @@ async function loadValidation() {
   $("yahoo-method").value = (yahoo.method || "POST").toUpperCase() === "GET" ? "GET" : "POST";
   $("yahoo-api-key").value = yahoo.api_key || "";
   $("yahoo-extra-domains").value = (yahoo.extra_domains || []).join(", ");
-  validationServers = (payload.servers || []).map((server, index) => ({
+  const allServers = (payload.servers || []).map((server, index) => ({
     id: server.id || ("sw" + (index + 1)),
     base_url: server.base_url || "",
     username: server.username || "",
     password: server.password || "",
     token: server.token || "",
   }));
+  const stolen = allServers.filter(isHttpVerifier);
+  validationServers = allServers.filter((server) => !isHttpVerifier(server));
+  if (stolen.length && !$("yahoo-url").value.trim()) {
+    $("yahoo-enabled").checked = true;
+    $("yahoo-url").value = stolen[0].base_url || "";
+    $("yahoo-method").value = "POST";
+    if (!$("yahoo-api-key").value && (stolen[0].token || stolen[0].password)) {
+      $("yahoo-api-key").value = stolen[0].token || stolen[0].password;
+    }
+  }
   if (!validationServers.length) {
     validationServers.push({ id: "sw1", base_url: "", username: "", password: "", token: "" });
   }
   renderValidation();
+}
+
+function isHttpVerifier(server) {
+  const id = String(server.id || "").trim().toLowerCase();
+  const url = String(server.base_url || "").toLowerCase();
+  return id === "yahoo" || id === "aol" || url.includes("/verify") || url.includes("/yahoo");
 }
 
 function renderValidation() {
@@ -1493,7 +1513,7 @@ $("btn-save-validation").onclick = async () => {
   $("validation-error").textContent = "";
   const payload = collectValidation();
   try {
-    for (const server of payload.servers.filter((entry) => entry.base_url)) {
+    for (const server of payload.servers.filter((entry) => entry.base_url && !isHttpVerifier(entry))) {
       const result = await api("/api/validation/test", {
         method: "POST",
         body: JSON.stringify(server),

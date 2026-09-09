@@ -1477,6 +1477,18 @@ async fn validation_test(state: &Arc<AppState>, request: &Request) -> Response {
         return Response::error(400, "enter the password again before testing a new server");
     }
 
+    if server.is_http_verifier() {
+        return Response::json_value(
+            200,
+            &json!({
+                "ok": true,
+                "id": server.id,
+                "base_url": server.base_url,
+                "detail": "this is a Yahoo/AOL verify API, not Stalwart — use the Yahoo channel (POST JSON). Save moves it there.",
+            }),
+        );
+    }
+
     match crate::validation::verify_credentials(&server).await {
         Ok(detail) => Response::json_value(
             200,
@@ -1514,7 +1526,11 @@ async fn yahoo_validation_test(state: &Arc<AppState>, request: &Request) -> Resp
         Ok(value) => value,
         Err(error) => return Response::error(400, &error),
     };
-    let saved = state.config().validation.yahoo.clone();
+    let saved = state
+        .config()
+        .validation
+        .yahoo_http()
+        .unwrap_or_else(|| state.config().validation.yahoo.clone());
     if body.url.trim().is_empty() {
         body.url = saved.url.clone();
     }
@@ -1593,6 +1609,7 @@ fn validation_put(state: &Arc<AppState>, request: &Request) -> Response {
         let previous = config.clone();
         config.validation = incoming.clone();
         config.restore_secrets_from(&previous);
+        config.validation.promote_http_verifier_cards();
     }) {
         Ok(_) => {
             tracing::info!(

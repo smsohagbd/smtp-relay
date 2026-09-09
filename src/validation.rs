@@ -85,16 +85,19 @@ pub async fn filter_recipients(
 
     let timeout = Duration::from_secs(config.timeout_seconds.max(1));
     let client = http_client(timeout);
+    let yahoo_cfg = config.yahoo_http();
     let yahoo_slots = Arc::new(Semaphore::new(
-        config.yahoo.concurrency.max(1).min(32) as usize,
+        yahoo_cfg
+            .as_ref()
+            .map(|yahoo| yahoo.concurrency.max(1).min(32) as usize)
+            .unwrap_or(5),
     ));
     futures_util::future::join_all(recipients.iter().map(|address| {
         let client = &client;
         let yahoo_slots = yahoo_slots.clone();
+        let yahoo_cfg = yahoo_cfg.clone();
         async move {
-            let yahoo = is_yahoo_address(address, &config.yahoo.extra_domains)
-                && config.yahoo.is_usable();
-            if yahoo {
+            if yahoo_cfg.is_some() && is_yahoo_address(address, &config.yahoo.extra_domains) {
                 let _permit = yahoo_slots.acquire().await.expect("yahoo semaphore");
             }
             check_recipient(client, config, address, timeout).await
@@ -110,9 +113,8 @@ async fn check_recipient(
     timeout: Duration,
 ) -> RecipientCheck {
     if is_yahoo_address(address, &config.yahoo.extra_domains) {
-        if config.yahoo.is_usable() {
-            return check_yahoo(client, &config.yahoo, address, config.allow_on_probe_error())
-                .await;
+        if let Some(yahoo) = config.yahoo_http() {
+            return check_yahoo(client, &yahoo, address, config.allow_on_probe_error()).await;
         }
         if config.usable().next().is_none() {
             return RecipientCheck {
@@ -202,11 +204,19 @@ async fn check_yahoo(
     allow_on_probe_error: bool,
 ) -> RecipientCheck {
     match call_yahoo_api(client, yahoo, address).await {
-        Ok(outcome) => RecipientCheck {
-            address: address.to_string(),
-            deliver: outcome.validated,
-            detail: outcome.detail,
-        },
+        Ok(outcome) => {
+            tracing::info!(
+                email = %address,
+                url = %yahoo.url,
+                validated = outcome.validated,
+                "yahoo verify"
+            );
+            RecipientCheck {
+                address: address.to_string(),
+                deliver: outcome.validated,
+                detail: outcome.detail,
+            }
+        }
         Err(reason) => RecipientCheck {
             address: address.to_string(),
             deliver: allow_on_probe_error,

@@ -314,7 +314,9 @@ impl Default for ValidationConfig {
 
 impl ValidationConfig {
     pub fn usable(&self) -> impl Iterator<Item = &ValidationServer> {
-        self.servers.iter().filter(|server| server.is_usable())
+        self.servers
+            .iter()
+            .filter(|server| server.is_usable() && !server.is_http_verifier())
     }
 
     pub fn allow_on_probe_error(&self) -> bool {
@@ -322,7 +324,55 @@ impl ValidationConfig {
     }
 
     pub fn has_any_channel(&self) -> bool {
-        self.usable().next().is_some() || self.yahoo.is_usable()
+        self.usable().next().is_some() || self.yahoo_http().is_some()
+    }
+
+    /// Dedicated Yahoo channel, or a server card that is actually `POST /verify`.
+    pub fn yahoo_http(&self) -> Option<YahooValidationConfig> {
+        if self.yahoo.is_usable() {
+            return Some(self.yahoo.clone());
+        }
+        let server = self.servers.iter().find(|server| {
+            server.is_http_verifier() && !server.base_url.trim().is_empty()
+        })?;
+        Some(YahooValidationConfig {
+            enabled: true,
+            url: server.base_url.trim().to_string(),
+            method: "POST".to_string(),
+            api_key: if !server.token.trim().is_empty() {
+                server.token.clone()
+            } else {
+                server.password.clone()
+            },
+            extra_domains: self.yahoo.extra_domains.clone(),
+            concurrency: self.yahoo.concurrency.max(1),
+        })
+    }
+
+    /// Move `POST /verify` cards out of the Stalwart list into `yahoo`.
+    pub fn promote_http_verifier_cards(&mut self) {
+        let mut keep = Vec::with_capacity(self.servers.len());
+        for server in self.servers.drain(..) {
+            if !server.is_http_verifier() || server.base_url.trim().is_empty() {
+                keep.push(server);
+                continue;
+            }
+            if !self.yahoo.is_usable() {
+                self.yahoo.enabled = true;
+                self.yahoo.url = server.base_url.trim().to_string();
+                if self.yahoo.method.trim().is_empty() {
+                    self.yahoo.method = "POST".to_string();
+                }
+                if self.yahoo.api_key.trim().is_empty() {
+                    self.yahoo.api_key = if !server.token.trim().is_empty() {
+                        server.token
+                    } else {
+                        server.password
+                    };
+                }
+            }
+        }
+        self.servers = keep;
     }
 }
 
@@ -418,6 +468,16 @@ impl Default for ValidationServer {
 impl ValidationServer {
     pub fn is_usable(&self) -> bool {
         !self.base_url.trim().is_empty()
+    }
+
+    /// True when this card is a JSON verify API, not a Stalwart mail host.
+    pub fn is_http_verifier(&self) -> bool {
+        let id = self.id.trim().to_ascii_lowercase();
+        let url = self.base_url.trim().to_ascii_lowercase();
+        id == "yahoo"
+            || id == "aol"
+            || url.contains("/verify")
+            || url.contains("/yahoo")
     }
 }
 
@@ -1581,6 +1641,36 @@ validation:
         redacted.restore_secrets_from(&config);
         assert_eq!(redacted.validation.servers[0].password, "sw-pass");
         assert_eq!(redacted.validation.servers[0].token, "sw-token");
+    }
+
+    #[test]
+    fn yahoo_verify_url_on_stalwart_card_is_used() {
+        let mut validation = ValidationConfig::default();
+        validation.enabled = true;
+        validation.servers.push(ValidationServer {
+            id: "yahoo".into(),
+            base_url: "http://109.199.97.35:6100/verify".into(),
+            token: "secret".into(),
+            ..Default::default()
+        });
+        validation.servers.push(ValidationServer {
+            id: "sw1".into(),
+            base_url: "https://h1.example.com".into(),
+            username: "admin".into(),
+            password: "pw".into(),
+            ..Default::default()
+        });
+        assert!(validation.servers[0].is_http_verifier());
+        assert!(!validation.servers[1].is_http_verifier());
+        let yahoo = validation.yahoo_http().expect("yahoo from card");
+        assert!(yahoo.enabled);
+        assert_eq!(yahoo.url, "http://109.199.97.35:6100/verify");
+        assert_eq!(yahoo.api_key, "secret");
+        assert_eq!(validation.usable().count(), 1);
+        validation.promote_http_verifier_cards();
+        assert!(validation.yahoo.is_usable());
+        assert_eq!(validation.servers.len(), 1);
+        assert_eq!(validation.servers[0].id, "sw1");
     }
 
     #[test]
