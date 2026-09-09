@@ -191,8 +191,8 @@ validation:
   #     token: ""
 
   # Yahoo / AOL / ymail skip Stalwart (those MX always accept RCPT TO).
-  # POST {"email":"..."} unless the URL contains {email}. JSON must include
-  # validated: true or validated: false. false = skip that recipient.
+  # POST {"email":"..."} unless the URL contains {email}. Accepts
+  # valid: true / validated: true / status: "valid". false = skip.
   yahoo:
     enabled: false
     url: ""
@@ -202,6 +202,7 @@ validation:
     extra_domains: []
     # extra_domains:
     #   - "yahoo.com.ph"
+    concurrency: 5
 
 queue:
   enabled: true

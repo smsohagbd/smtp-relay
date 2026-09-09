@@ -1530,6 +1530,7 @@ async fn yahoo_validation_test(state: &Arc<AppState>, request: &Request) -> Resp
         method: body.method,
         api_key: body.api_key,
         extra_domains: saved.extra_domains,
+        concurrency: saved.concurrency,
     };
     if !yahoo.url.starts_with("http://") && !yahoo.url.starts_with("https://") {
         return Response::json_value(
@@ -1550,12 +1551,12 @@ async fn yahoo_validation_test(state: &Arc<AppState>, request: &Request) -> Resp
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     match crate::validation::call_yahoo_api(&client, &yahoo, email).await {
-        Ok(validated) => Response::json_value(
+        Ok(outcome) => Response::json_value(
             200,
             &json!({
                 "ok": true,
-                "validated": validated,
-                "detail": format!("validated: {validated}"),
+                "validated": outcome.validated,
+                "detail": outcome.detail,
             }),
         ),
         Err(detail) => Response::json_value(200, &json!({ "ok": false, "detail": detail })),

@@ -6,10 +6,12 @@
 //! some server reports `rcptToSuccess`. `rcptToError` means skip that
 //! address so it never hits the upstream SMTP pool.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde_json::Value;
+use tokio::sync::Semaphore;
 
 use crate::config::{ValidationConfig, ValidationServer, YahooValidationConfig};
 
@@ -21,19 +23,31 @@ const YAHOO_DOMAINS: &[&str] = &[
     "yahoo.com.au",
     "yahoo.com.br",
     "yahoo.com.mx",
-    "yahoo.com.sg",
     "yahoo.com.ar",
-    "yahoo.com.tw",
+    "yahoo.com.sg",
     "yahoo.ca",
     "yahoo.de",
     "yahoo.fr",
-    "yahoo.it",
     "yahoo.es",
+    "yahoo.it",
     "yahoo.in",
     "ymail.com",
     "rocketmail.com",
+    "myyahoo.com",
+    "yahoo.com.tw",
+];
+
+const AOL_DOMAINS: &[&str] = &[
     "aol.com",
+    "aol.co.uk",
+    "aol.de",
+    "aol.fr",
+    "aol.in",
     "aim.com",
+    "wow.com",
+    "netscape.net",
+    "love.com",
+    "games.com",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,11 +85,21 @@ pub async fn filter_recipients(
 
     let timeout = Duration::from_secs(config.timeout_seconds.max(1));
     let client = http_client(timeout);
-    futures_util::future::join_all(
-        recipients
-            .iter()
-            .map(|address| check_recipient(&client, config, address, timeout)),
-    )
+    let yahoo_slots = Arc::new(Semaphore::new(
+        config.yahoo.concurrency.max(1).min(32) as usize,
+    ));
+    futures_util::future::join_all(recipients.iter().map(|address| {
+        let client = &client;
+        let yahoo_slots = yahoo_slots.clone();
+        async move {
+            let yahoo = is_yahoo_address(address, &config.yahoo.extra_domains)
+                && config.yahoo.is_usable();
+            if yahoo {
+                let _permit = yahoo_slots.acquire().await.expect("yahoo semaphore");
+            }
+            check_recipient(client, config, address, timeout).await
+        }
+    }))
     .await
 }
 
@@ -154,7 +178,10 @@ pub fn is_yahoo_address(address: &str, extra_domains: &[String]) -> bool {
     if domain.is_empty() {
         return false;
     }
-    YAHOO_DOMAINS.iter().any(|known| domain_matches(&domain, known))
+    YAHOO_DOMAINS
+        .iter()
+        .chain(AOL_DOMAINS.iter())
+        .any(|known| domain_matches(&domain, known))
         || extra_domains
             .iter()
             .any(|known| domain_matches(&domain, known.trim().to_ascii_lowercase().as_str()))
@@ -175,15 +202,10 @@ async fn check_yahoo(
     allow_on_probe_error: bool,
 ) -> RecipientCheck {
     match call_yahoo_api(client, yahoo, address).await {
-        Ok(true) => RecipientCheck {
+        Ok(outcome) => RecipientCheck {
             address: address.to_string(),
-            deliver: true,
-            detail: "yahoo API validated: true".into(),
-        },
-        Ok(false) => RecipientCheck {
-            address: address.to_string(),
-            deliver: false,
-            detail: "yahoo API validated: false".into(),
+            deliver: outcome.validated,
+            detail: outcome.detail,
         },
         Err(reason) => RecipientCheck {
             address: address.to_string(),
@@ -197,12 +219,18 @@ async fn check_yahoo(
     }
 }
 
-/// Calls the Yahoo verifier. Returns `Ok(true/false)` from `validated`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YahooApiOutcome {
+    pub validated: bool,
+    pub detail: String,
+}
+
+/// Calls the Yahoo verifier. Reads `validate` / `valid` / `validated`.
 pub async fn call_yahoo_api(
     client: &reqwest::Client,
     yahoo: &YahooValidationConfig,
     address: &str,
-) -> Result<bool, String> {
+) -> Result<YahooApiOutcome, String> {
     let url = yahoo_request_url(&yahoo.url, address);
     let mut request = if yahoo.method() == "GET" {
         client.get(&url)
@@ -222,19 +250,86 @@ pub async fn call_yahoo_api(
         .map_err(|error| format!("could not reach Yahoo API: {error}"))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
+    let value = serde_json::from_str::<Value>(&body).ok();
     if !status.is_success() {
-        return Err(format!(
-            "HTTP {status} {}",
-            body.chars().take(180).collect::<String>()
-        ));
+        let hint = value
+            .as_ref()
+            .and_then(yahoo_error_text)
+            .unwrap_or_else(|| body.chars().take(180).collect::<String>());
+        return Err(format!("HTTP {status} {hint}"));
     }
-    let value: Value = serde_json::from_str(&body)
-        .map_err(|error| format!("Yahoo API did not return JSON: {error}"))?;
-    read_validated(&value).ok_or_else(|| {
+    let value = value.ok_or_else(|| {
         format!(
-            "Yahoo API JSON has no `validated` field: {}",
+            "Yahoo API did not return JSON: {}",
             body.chars().take(180).collect::<String>()
         )
+    })?;
+    interpret_yahoo_json(&value)
+}
+
+fn interpret_yahoo_json(value: &Value) -> Result<YahooApiOutcome, String> {
+    let note = yahoo_error_text(value);
+    if field_bool(value, "fail") == Some(true) {
+        return Err(note.unwrap_or_else(|| "fail: true".into()));
+    }
+    if field_bool(value, "ok") == Some(false) {
+        return Err(note.unwrap_or_else(|| "ok: false".into()));
+    }
+    let Some(validated) = read_validated(value) else {
+        return Err(note.unwrap_or_else(|| {
+            format!(
+                "Yahoo API JSON has no validate/valid/validated field: {}",
+                value.to_string().chars().take(180).collect::<String>()
+            )
+        }));
+    };
+    let detail = match (validated, note) {
+        (true, Some(text)) => format!("yahoo API validate: true ({text})"),
+        (true, None) => "yahoo API validate: true".into(),
+        (false, Some(text)) => format!("yahoo API validate: false ({text})"),
+        (false, None) => "yahoo API validate: false".into(),
+    };
+    Ok(YahooApiOutcome { validated, detail })
+}
+
+fn yahoo_error_text(value: &Value) -> Option<String> {
+    json_text_field(value, &["error", "message", "detail", "reason"])
+}
+
+fn json_text_field(value: &Value, keys: &[&str]) -> Option<String> {
+    let Value::Object(map) = value else {
+        return None;
+    };
+    for (key, child) in map {
+        if !keys.iter().any(|want| key.eq_ignore_ascii_case(want)) {
+            continue;
+        }
+        match child {
+            Value::Null => continue,
+            Value::String(text) => {
+                let text = text.trim();
+                if !text.is_empty() && !text.eq_ignore_ascii_case("null") {
+                    return Some(text.to_string());
+                }
+            }
+            Value::Bool(_) => continue,
+            other => {
+                let text = other.to_string();
+                if text != "null" {
+                    return Some(text);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn field_bool(value: &Value, name: &str) -> Option<bool> {
+    let Value::Object(map) = value else {
+        return None;
+    };
+    map.iter().find_map(|(key, child)| {
+        key.eq_ignore_ascii_case(name).then(|| json_bool(child)).flatten()
     })
 }
 
@@ -246,16 +341,48 @@ fn yahoo_request_url(template: &str, address: &str) -> String {
     base.trim_end_matches('/').to_string()
 }
 
+const VALID_KEYS: &[&str] = &[
+    "validate",
+    "validated",
+    "valid",
+    "is_valid",
+    "isvalid",
+    "deliverable",
+];
+
+const STATUS_KEYS: &[&str] = &["status", "result", "verdict", "state", "quality"];
+
 fn read_validated(value: &Value) -> Option<bool> {
     match value {
-        Value::Bool(flag) => Some(*flag),
         Value::Object(map) => {
-            for key in ["validated", "valid", "is_valid", "Valid", "Validated"] {
-                if let Some(found) = map.get(key).and_then(json_bool) {
-                    return Some(found);
+            for (key, child) in map {
+                if VALID_KEYS.iter().any(|want| key.eq_ignore_ascii_case(want)) {
+                    if let Some(found) = json_bool(child) {
+                        return Some(found);
+                    }
+                    if let Some(found) = status_bool(child) {
+                        return Some(found);
+                    }
                 }
             }
-            map.values().find_map(read_validated)
+            for (key, child) in map {
+                if STATUS_KEYS.iter().any(|want| key.eq_ignore_ascii_case(want)) {
+                    if let Some(found) = status_bool(child).or_else(|| json_bool(child)) {
+                        return Some(found);
+                    }
+                }
+            }
+            for (key, child) in map {
+                if key.eq_ignore_ascii_case("data")
+                    || key.eq_ignore_ascii_case("response")
+                    || key.eq_ignore_ascii_case("payload")
+                {
+                    if let Some(found) = read_validated(child) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
         }
         Value::Array(items) => items.iter().find_map(read_validated),
         _ => None,
@@ -266,11 +393,27 @@ fn json_bool(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(flag) => Some(*flag),
         Value::Number(n) => n.as_i64().map(|n| n != 0),
-        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
-            "true" | "yes" | "1" | "valid" | "ok" => Some(true),
-            "false" | "no" | "0" | "invalid" => Some(false),
+        Value::String(text) => status_bool(value).or_else(|| match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "1" => Some(true),
+            "false" | "no" | "0" => Some(false),
             _ => None,
-        },
+        }),
+        _ => None,
+    }
+}
+
+fn status_bool(value: &Value) -> Option<bool> {
+    let text = match value {
+        Value::String(text) => text.trim().to_ascii_lowercase(),
+        Value::Bool(flag) => return Some(*flag),
+        Value::Number(n) => return n.as_i64().map(|n| n != 0),
+        _ => return None,
+    };
+    match text.replace('-', "_").as_str() {
+        "valid" | "validated" | "true" | "yes" | "ok" | "deliverable" | "safe" | "good"
+        | "safe_to_send" => Some(true),
+        "invalid" | "false" | "no" | "undeliverable" | "bounce" | "unknown" | "do_not_mail"
+        | "spamtrap" | "abuse" | "disposable" | "error" => Some(false),
         _ => None,
     }
 }
@@ -692,6 +835,11 @@ event: event\ndata: [{\"type\":\"rcptToSuccess\",\"elapsed\":9}]\n\n"
         assert!(is_yahoo_address("x@rocketmail.com", &[]));
         assert!(is_yahoo_address("x@aol.com", &[]));
         assert!(is_yahoo_address("x@mail.yahoo.com", &[]));
+        assert!(is_yahoo_address("x@myyahoo.com", &[]));
+        assert!(is_yahoo_address("x@wow.com", &[]));
+        assert!(is_yahoo_address("x@netscape.net", &[]));
+        assert!(is_yahoo_address("x@aol.co.uk", &[]));
+        assert!(is_yahoo_address("x@love.com", &[]));
         assert!(!is_yahoo_address("lead@gmail.com", &[]));
         assert!(is_yahoo_address(
             "x@custom-yahoo.test",
@@ -702,7 +850,19 @@ event: event\ndata: [{\"type\":\"rcptToSuccess\",\"elapsed\":9}]\n\n"
     #[test]
     fn yahoo_json_reads_validated_true_false() {
         assert_eq!(
-            read_validated(&serde_json::json!({ "validated": true })),
+            read_validated(&serde_json::json!({ "validate": true })),
+            Some(true)
+        );
+        assert_eq!(
+            read_validated(&serde_json::json!({ "validate": false })),
+            Some(false)
+        );
+        assert_eq!(
+            read_validated(&serde_json::json!({ "valid": true })),
+            Some(true)
+        );
+        assert_eq!(
+            read_validated(&serde_json::json!({ "Valid": "True" })),
             Some(true)
         );
         assert_eq!(
@@ -710,13 +870,55 @@ event: event\ndata: [{\"type\":\"rcptToSuccess\",\"elapsed\":9}]\n\n"
             Some(false)
         );
         assert_eq!(
-            read_validated(&serde_json::json!({ "data": { "validated": true } })),
+            read_validated(&serde_json::json!({ "data": { "valid": false } })),
+            Some(false)
+        );
+        assert_eq!(
+            read_validated(&serde_json::json!({ "status": "valid" })),
             Some(true)
         );
         assert_eq!(
-            read_validated(&serde_json::json!({ "ok": 1 })),
+            read_validated(&serde_json::json!({ "result": "invalid" })),
+            Some(false)
+        );
+        assert_eq!(
+            read_validated(&serde_json::json!({ "ok": true, "count": 1 })),
             None
         );
+    }
+
+    #[test]
+    fn yahoo_script_payloads_use_validate_and_message() {
+        let exists = interpret_yahoo_json(&serde_json::json!({
+            "ok": true,
+            "fail": false,
+            "validate": true,
+            "error": null,
+            "message": "Address already exists"
+        }))
+        .unwrap();
+        assert!(exists.validated);
+        assert!(exists.detail.contains("Address already exists"));
+
+        let missing = interpret_yahoo_json(&serde_json::json!({
+            "ok": true,
+            "fail": false,
+            "validate": false,
+            "error": null,
+            "message": "Address does not exist yet"
+        }))
+        .unwrap();
+        assert!(!missing.validated);
+        assert!(missing.detail.contains("Address does not exist yet"));
+
+        let failed = interpret_yahoo_json(&serde_json::json!({
+            "ok": false,
+            "fail": true,
+            "validate": false,
+            "error": "proxy timeout",
+            "message": "could not reach yahoo"
+        }));
+        assert!(failed.unwrap_err().contains("proxy timeout"));
     }
 
     #[test]

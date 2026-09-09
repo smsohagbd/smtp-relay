@@ -340,8 +340,15 @@ pub struct YahooValidationConfig {
     pub method: String,
     /// Optional bearer token / API key.
     pub api_key: String,
-    /// Extra domains beyond the built-in Yahoo list (one per line in the UI).
+    /// Extra domains beyond the built-in Yahoo / AOL list.
     pub extra_domains: Vec<String>,
+    /// Max Yahoo API calls in flight (Gmail/Stalwart checks are unlimited).
+    #[serde(default = "default_yahoo_concurrency")]
+    pub concurrency: u32,
+}
+
+fn default_yahoo_concurrency() -> u32 {
+    5
 }
 
 impl Default for YahooValidationConfig {
@@ -352,6 +359,7 @@ impl Default for YahooValidationConfig {
             method: "POST".to_string(),
             api_key: String::new(),
             extra_domains: Vec::new(),
+            concurrency: default_yahoo_concurrency(),
         }
     }
 }

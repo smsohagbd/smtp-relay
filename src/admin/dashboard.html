@@ -391,14 +391,16 @@
         </div>
         <div id="validation-servers"></div>
         <div class="template-card" style="margin-top:16px">
-          <strong style="display:block;margin-bottom:8px">Yahoo / AOL channel</strong>
+          <strong style="display:block;margin-bottom:8px">Yahoo / AOL channel — not a Stalwart server</strong>
           <p style="color:var(--muted);margin:0 0 12px;font-size:12.5px">
-            Addresses ending in yahoo.com, ymail.com, rocketmail.com, aol.com
-            (and extra domains) skip Stalwart and call this API instead.
-            Expected JSON: <span class="mono">{"validated": true}</span> or
-            <span class="mono">{"validated": false}</span> — false skips the address.
-            POST body is <span class="mono">{"email":"..."}</span>. Put
-            <span class="mono">{email}</span> in the URL for GET.
+            Do not add this as a Stalwart card above. Yahoo only needs
+            <strong>API URL + token</strong> (username/password stay empty).
+            Accepts <span class="mono">validate: true</span>,
+            <span class="mono">valid: true</span>, or
+            <span class="mono">validated: true</span>.
+            False skips. API errors show <span class="mono">error</span> /
+            <span class="mono">message</span>. Max 5 Yahoo checks at once;
+            Gmail/Stalwart keep running in parallel.
           </p>
           <label class="inline" style="margin-bottom:10px">
             <input type="checkbox" id="yahoo-enabled"> Enable Yahoo API
@@ -1432,6 +1434,7 @@ function collectValidation() {
       method: $("yahoo-method").value,
       api_key: $("yahoo-api-key").value,
       extra_domains: $("yahoo-extra-domains").value.split(/[\s,]+/).map((d) => d.trim()).filter(Boolean),
+      concurrency: 5,
     },
     servers: Array.from($("validation-servers").querySelectorAll(".template-card")).map((card) => ({
       id: card.querySelector("[data-field=id]").value.trim(),
