@@ -232,6 +232,7 @@ pub async fn attempt_delivery(
             crate::validation::filter_recipients(&config.validation, &message.recipients).await;
         let mut notes = Vec::new();
         let mut valid = Vec::new();
+        let mut skipped = Vec::new();
         for check in checks {
             notes.push(format!("{}: {}", check.address, check.detail));
             if check.deliver {
@@ -239,6 +240,7 @@ pub async fn attempt_delivery(
                 valid.push(check.address);
             } else {
                 state.metrics.inc(&state.metrics.counters.validation_skipped);
+                skipped.push(check.address.clone());
                 tracing::info!(
                     id = %message.id,
                     recipient = %check.address,
@@ -249,7 +251,7 @@ pub async fn attempt_delivery(
         }
         state.metrics.activity.update(&message.id, |record| {
             record.notes.extend(notes);
-            record.recipients = valid.clone();
+            record.skipped_recipients = skipped;
         });
         if valid.is_empty() {
             return finish_failed(

@@ -170,6 +170,7 @@ async fn probe_server(
 
     let mut leftover = String::new();
     let mut last_hint = String::new();
+    let mut rcpt_error: Option<String> = None;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let bytes = match chunk {
@@ -190,20 +191,11 @@ async fn probe_server(
                     };
                 }
                 StageClass::InvalidMailbox(reason) => {
-                    return ProbeOutcome::InvalidMailbox {
-                        server: server.id.clone(),
-                        reason,
-                    };
+                    // First MX may reject; later hosts can still accept.
+                    rcpt_error = Some(reason);
                 }
                 StageClass::Done => {
-                    return ProbeOutcome::ProbeFailed {
-                        server: server.id.clone(),
-                        reason: if last_hint.is_empty() {
-                            "completed without RCPT TO".into()
-                        } else {
-                            format!("completed without RCPT TO ({last_hint})")
-                        },
-                    };
+                    return finish_probe(&server.id, rcpt_error, &last_hint);
                 }
                 StageClass::Continue => {
                     if let Some(hint) = stage_error_hint(&stage) {
@@ -214,12 +206,26 @@ async fn probe_server(
         }
     }
 
+    finish_probe(&server.id, rcpt_error, &last_hint)
+}
+
+fn finish_probe(
+    server: &str,
+    rcpt_error: Option<String>,
+    last_hint: &str,
+) -> ProbeOutcome {
+    if let Some(reason) = rcpt_error {
+        return ProbeOutcome::InvalidMailbox {
+            server: server.to_string(),
+            reason,
+        };
+    }
     ProbeOutcome::ProbeFailed {
-        server: server.id.clone(),
+        server: server.to_string(),
         reason: if last_hint.is_empty() {
-            "delivery stream ended without a verdict".into()
+            "completed without RCPT TO".into()
         } else {
-            format!("stream ended without RCPT TO ({last_hint})")
+            format!("completed without RCPT TO ({last_hint})")
         },
     }
 }
@@ -302,6 +308,9 @@ fn stage_error_hint(stage: &Value) -> Option<String> {
 }
 
 fn take_sse_stages(buffer: &mut String) -> Vec<Value> {
+    if buffer.contains('\r') {
+        *buffer = buffer.replace("\r\n", "\n").replace('\r', "\n");
+    }
     let mut stages = Vec::new();
     while let Some(split) = buffer.find("\n\n") {
         let frame = buffer[..split].to_string();
@@ -395,6 +404,41 @@ event: event\ndata: [{\"type\":\"rcptToSuccess\",\"elapsed\":9}]\n\n"
             classify_stage(&stage_reason("connectionError", "refused")),
             StageClass::Continue
         );
+    }
+
+    #[test]
+    fn crlf_sse_frames_are_parsed() {
+        let mut buf =
+            "event: event\r\ndata: [{\"type\":\"rcptToSuccess\",\"elapsed\":9}]\r\n\r\n".to_string();
+        let stages = take_sse_stages(&mut buf);
+        assert_eq!(classify_stage(&stages[0]), StageClass::Acceptable);
+    }
+
+    #[test]
+    fn final_rcpt_error_is_used_after_path_noise() {
+        let outcome = finish_probe(
+            "sw1",
+            Some("550 no such user".into()),
+            "tlsaLookupError: Bogus TLSA record",
+        );
+        assert_eq!(
+            outcome,
+            ProbeOutcome::InvalidMailbox {
+                server: "sw1".into(),
+                reason: "550 no such user".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn path_error_without_rcpt_is_not_an_invalid_mailbox() {
+        let outcome = finish_probe("sw1", None, "tlsaLookupError: Bogus TLSA record");
+        match outcome {
+            ProbeOutcome::ProbeFailed { reason, .. } => {
+                assert!(reason.contains("Bogus TLSA"));
+            }
+            other => panic!("expected probe failed, got {other:?}"),
+        }
     }
 
     #[test]

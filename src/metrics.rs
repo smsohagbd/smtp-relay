@@ -348,6 +348,9 @@ pub struct MessageRecord {
     pub client_ip: Option<String>,
     /// Transformations applied by the rewriter.
     pub notes: Vec<String>,
+    /// Recipients dropped by the Stalwart delivery test (kept for search).
+    #[serde(default)]
+    pub skipped_recipients: Vec<String>,
 }
 
 impl MessageRecord {
@@ -371,6 +374,7 @@ impl MessageRecord {
             error: None,
             client_ip: None,
             notes: Vec::new(),
+            skipped_recipients: Vec::new(),
         }
     }
 }
@@ -459,7 +463,7 @@ impl ActivityLog {
         status: Option<MessageStatus>,
         relay_id: Option<&str>,
     ) -> Vec<MessageRecord> {
-        self.page(limit, 1, status, relay_id).0
+        self.page(limit, 1, status, relay_id, None).0
     }
 
     /// One page of records (newest first) plus the filtered total.
@@ -469,6 +473,7 @@ impl ActivityLog {
         page: usize,
         status: Option<MessageStatus>,
         relay_id: Option<&str>,
+        search: Option<&str>,
     ) -> (Vec<MessageRecord>, usize) {
         let mut records = if self.directory.is_some() {
             self.load_all()
@@ -481,6 +486,7 @@ impl ActivityLog {
                 && relay_id
                     .map(|want| record.relay_id.as_deref() == Some(want))
                     .unwrap_or(true)
+                && record_matches_search(record, search)
         });
         let total = records.len();
         let page = page.max(1);
@@ -741,6 +747,24 @@ fn rename_if_exists(from: PathBuf, to: PathBuf) -> std::io::Result<()> {
         fs::rename(from, to)?;
     }
     Ok(())
+}
+
+fn record_matches_search(record: &MessageRecord, search: Option<&str>) -> bool {
+    let Some(needle) = search.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    let needle = needle.to_ascii_lowercase();
+    let hit = |value: &str| value.to_ascii_lowercase().contains(&needle);
+    hit(&record.id)
+        || hit(&record.original_from)
+        || hit(&record.from_header)
+        || hit(&record.envelope_from)
+        || record.recipients.iter().any(|address| hit(address))
+        || record.skipped_recipients.iter().any(|address| hit(address))
+        || record.subject.as_deref().is_some_and(hit)
+        || record.error.as_deref().is_some_and(hit)
+        || record.notes.iter().any(|note| hit(note))
+        || record.relay_id.as_deref().is_some_and(hit)
 }
 
 fn format_maillog_line(record: &MessageRecord) -> String {
@@ -1096,7 +1120,7 @@ mod tests {
         // Most recently updated first (`a` was touched after `b` was inserted).
         assert_eq!(log.recent(1, None, None)[0].id, "a");
 
-        let (page, total) = log.page(1, 2, None, None);
+        let (page, total) = log.page(1, 2, None, None, None);
         assert_eq!(total, 2);
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].id, "b");
@@ -1135,7 +1159,7 @@ mod tests {
         assert!(text.contains("to=<lead@gmail.com>"));
         assert!(text.contains("status=failed") || text.contains("status=deferred"));
 
-        let (page, total) = log.page(50, 1, Some(MessageStatus::Failed), None);
+        let (page, total) = log.page(50, 1, Some(MessageStatus::Failed), None, None);
         assert_eq!(total, 1);
         assert_eq!(page[0].id, "qid1");
         assert_eq!(log.clear_status(Some(MessageStatus::Failed)), 1);
@@ -1158,6 +1182,23 @@ mod tests {
         assert_eq!(all.len(), ACTIVITY_CAPACITY);
         assert!(log.get("0").is_none());
         assert!(log.get(&(ACTIVITY_CAPACITY + 9).to_string()).is_some());
+    }
+
+    #[test]
+    fn activity_log_search_finds_address_in_to_notes_and_skipped() {
+        let log = ActivityLog::default();
+        let mut record = MessageRecord::new("qid-search".to_string());
+        record.original_from = "Jennifer <jennifer@hub.test>".to_string();
+        record.recipients = vec!["lead@gmail.com".to_string()];
+        record.skipped_recipients = vec!["nobody@yahoo.com".to_string()];
+        record.notes = vec!["nobody@yahoo.com: invalid via `sw1`: 550 no such user".to_string()];
+        record.subject = Some("[TEST] 6".to_string());
+        log.push(record);
+
+        assert_eq!(log.page(10, 1, None, None, Some("nobody@yahoo.com")).1, 1);
+        assert_eq!(log.page(10, 1, None, None, Some("lead@gmail")).1, 1);
+        assert_eq!(log.page(10, 1, None, None, Some("TEST] 6")).1, 1);
+        assert_eq!(log.page(10, 1, None, None, Some("missing@x.com")).1, 0);
     }
 
     #[test]

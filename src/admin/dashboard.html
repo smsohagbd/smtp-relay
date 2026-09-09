@@ -303,6 +303,8 @@
             <option value="rejected">rejected</option>
           </select>
         </label>
+        <input type="search" id="msg-search" placeholder="Search address, subject, id" autocomplete="off" style="min-width:220px">
+        <button id="btn-msg-search">Search</button>
         <label class="inline" title="Save the MIME Mautic actually submits so you can copy it">
           <input type="checkbox" id="dump-inbound"> Capture inbound MIME
         </label>
@@ -869,6 +871,17 @@ function updateSelectionUi() {
 }
 
 // --- messages and queue -----------------------------------------------------
+function messageTo(message) {
+  const skipped = message.skipped_recipients || [];
+  const recipients = message.recipients || [];
+  const shown = recipients.length ? recipients : skipped;
+  let text = shown.slice(0, 2).join(", ");
+  if (shown.length > 2) text += " +" + (shown.length - 2);
+  if (skipped.length && recipients.length) text += " (" + skipped.length + " skipped)";
+  else if (skipped.length && !recipients.length) text += " (skipped)";
+  return text;
+}
+
 function renderMessages(payload) {
   const messages = payload.messages || [];
   const total = payload.total || 0;
@@ -889,14 +902,17 @@ function renderMessages(payload) {
   const dumpBox = $("dump-inbound");
   if (dumpBox && payload.dump_inbound !== undefined) dumpBox.checked = !!payload.dump_inbound;
   if (!messages.length) {
-    $("messages-table").innerHTML = `<div class="empty">No messages yet.${payload.dump_inbound ? " Capture is on — send from Mautic, then open MIME." : ""}</div>${pager}`;
+    const empty = payload.q
+      ? "No messages match this search."
+      : (`No messages yet.${payload.dump_inbound ? " Capture is on — send from Mautic, then open MIME." : ""}`);
+    $("messages-table").innerHTML = `<div class="empty">${empty}</div>${pager}`;
     return;
   }
   const rows = messages.map((message) => `<tr>
     <td class="mono" style="font-size:11.5px">${clock(message.received_at)}</td>
     <td><span class="pill ${STATUS_KIND[message.status] || "mute"}">${escapeHtml(message.status)}</span></td>
     <td class="mono" style="font-size:11.5px">${escapeHtml(message.from_header || message.original_from)}</td>
-    <td>${escapeHtml((message.recipients || []).slice(0, 2).join(", "))}${(message.recipients || []).length > 2 ? ` +${message.recipients.length - 2}` : ""}</td>
+    <td>${escapeHtml(messageTo(message))}</td>
     <td>${escapeHtml((message.subject || "").slice(0, 60))}</td>
     <td class="mono" style="font-size:11.5px">${escapeHtml(message.relay_id || "—")}</td>
     <td class="num">${message.attempts}</td>
@@ -959,10 +975,12 @@ async function loadTab(reason) {
   reason = reason || "open";
   if (currentTab === "messages") {
     const status = $("msg-status").value;
+    const query = ($("msg-search") && $("msg-search").value.trim()) || "";
     const payload = await api(
       "/api/messages?limit=" + MESSAGE_PAGE_SIZE
         + "&page=" + messagePage
         + "&status=" + encodeURIComponent(status)
+        + (query ? "&q=" + encodeURIComponent(query) : "")
     );
     renderMessages(payload);
   } else if (currentTab === "queue") {
@@ -1039,6 +1057,14 @@ $("btn-auto-refresh").onclick = () => {
 };
 $("window").onchange = loadStatus;
 $("msg-status").onchange = () => { messagePage = 1; loadTab(); };
+$("btn-msg-search").onclick = () => { messagePage = 1; loadTab(); };
+$("msg-search").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    messagePage = 1;
+    loadTab();
+  }
+});
 
 $("strategy").onchange = async (event) => {
   await act("/api/routing", {

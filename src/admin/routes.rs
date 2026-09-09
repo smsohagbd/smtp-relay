@@ -1582,6 +1582,9 @@ fn messages(state: &Arc<AppState>, request: &Request) -> Response {
     let limit: usize = request.query_as("limit").unwrap_or(50).clamp(1, 1_000);
     let page: usize = request.query_as("page").unwrap_or(1).max(1);
     let relay = request.query_param("relay");
+    let search = request
+        .query_param("q")
+        .or_else(|| request.query_param("search"));
     let status = match request.query_param("status") {
         None | Some("") | Some("all") => None,
         Some(value) => match parse_status(value) {
@@ -1590,7 +1593,10 @@ fn messages(state: &Arc<AppState>, request: &Request) -> Response {
         },
     };
 
-    let (records, total) = state.metrics.activity.page(limit, page, status, relay);
+    let (records, total) = state
+        .metrics
+        .activity
+        .page(limit, page, status, relay, search);
     let pages = if total == 0 {
         1
     } else {
@@ -1604,6 +1610,7 @@ fn messages(state: &Arc<AppState>, request: &Request) -> Response {
             "page": page,
             "pages": pages,
             "limit": limit,
+            "q": search.unwrap_or(""),
             "maillog": state.metrics.activity.maillog_path().map(|path| path.display().to_string()),
             "dump_inbound": state.config().logging.dump_inbound,
             "messages": records.into_iter().map(|record| {
