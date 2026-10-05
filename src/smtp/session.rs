@@ -378,7 +378,12 @@ impl Session {
             .server
             .auth_users
             .iter()
-            .any(|user| user.username == username && secret_eq(&user.password, &password));
+            .any(|user| user.username == username && secret_eq(&user.password, &password))
+            || self
+                .config
+                .smtp_details
+                .iter()
+                .any(|detail| detail.username == username && secret_eq(&detail.password, &password));
 
         if matched {
             self.authenticated = true;
@@ -649,6 +654,7 @@ impl Session {
             raw,
             client_ip: Some(self.peer.ip()),
             helo: self.helo_name.clone(),
+            auth_user: self.auth_user.clone(),
         };
 
         tracing::info!(

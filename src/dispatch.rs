@@ -30,6 +30,7 @@ pub struct InboundMessage {
     pub raw: Vec<u8>,
     pub client_ip: Option<IpAddr>,
     pub helo: String,
+    pub auth_user: Option<String>,
 }
 
 /// What the inbound session should tell the submitting client.
@@ -110,6 +111,7 @@ pub async fn submit(state: &Arc<AppState>, inbound: InboundMessage) -> SubmitOut
         next_attempt_at: chrono::Utc::now(),
         tried_relays: Vec::new(),
         last_error: None,
+        auth_user: inbound.auth_user,
         raw: inbound.raw,
     };
 
@@ -276,6 +278,8 @@ pub async fn attempt_delivery(
             sender: &message.original_from,
             recipients: &message.recipients,
             exclude: &attempted,
+            auth_user: message.auth_user.as_deref(),
+            helo: &message.helo,
         };
 
         let route = match selector::select(&pool, &request) {

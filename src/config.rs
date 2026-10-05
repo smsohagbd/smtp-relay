@@ -40,6 +40,7 @@ pub struct Config {
     pub rotation: RotationConfig,
     pub validation: ValidationConfig,
     pub relays: Vec<RelayConfig>,
+    pub smtp_details: Vec<SmtpDetail>,
 }
 
 impl Default for Config {
@@ -55,6 +56,7 @@ impl Default for Config {
             rotation: RotationConfig::default(),
             validation: ValidationConfig::default(),
             relays: Vec::new(),
+            smtp_details: Vec::new(),
         }
     }
 }
@@ -112,6 +114,28 @@ impl Default for ServerConfig {
 pub struct InboundUser {
     pub username: String,
     pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SmtpDetail {
+    pub id: String,
+    pub label: String,
+    pub hostname: String,
+    pub username: String,
+    pub password: String,
+}
+
+impl Default for SmtpDetail {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            hostname: String::new(),
+            username: String::new(),
+            password: String::new(),
+        }
+    }
 }
 
 /// Controls when the inbound session reports success to the submitting client.
@@ -935,6 +959,12 @@ pub struct RelayConfig {
     pub tags: Vec<String>,
     /// SMTP credentials. Omit for an unauthenticated upstream.
     pub auth: Option<AuthConfig>,
+    /// Associated SMTP Detail id or label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp_detail_id: Option<String>,
+    /// When true, this relay participates in the active rotation pool.
+    #[serde(default = "default_true")]
+    pub in_rotation_pool: bool,
 }
 
 impl Default for RelayConfig {
@@ -960,6 +990,8 @@ impl Default for RelayConfig {
             description: None,
             tags: Vec::new(),
             auth: None,
+            smtp_detail_id: None,
+            in_rotation_pool: true,
         }
     }
 }
@@ -1152,6 +1184,16 @@ impl Config {
         self.relays.iter_mut().find(|r| r.id == id)
     }
 
+    #[allow(dead_code)]
+    pub fn smtp_detail(&self, id: &str) -> Option<&SmtpDetail> {
+        self.smtp_details.iter().find(|d| d.id == id)
+    }
+
+    #[allow(dead_code)]
+    pub fn smtp_detail_mut(&mut self, id: &str) -> Option<&mut SmtpDetail> {
+        self.smtp_details.iter_mut().find(|d| d.id == id)
+    }
+
     /// Copy with every secret replaced by [`REDACTED`], safe to hand to the API.
     pub fn redacted(&self) -> Self {
         let mut clone = self.clone();
@@ -1162,6 +1204,9 @@ impl Config {
         }
         for user in &mut clone.server.auth_users {
             user.password = REDACTED.to_string();
+        }
+        for detail in &mut clone.smtp_details {
+            detail.password = REDACTED.to_string();
         }
         if !clone.admin.api_token.is_empty() {
             clone.admin.api_token = REDACTED.to_string();
@@ -1215,6 +1260,19 @@ impl Config {
             if user.password == REDACTED {
                 if let Some(old) = old_users.get(user.username.as_str()) {
                     user.password = (*old).to_string();
+                }
+            }
+        }
+
+        let old_details: BTreeMap<&str, &str> = previous
+            .smtp_details
+            .iter()
+            .map(|d| (d.id.as_str(), d.password.as_str()))
+            .collect();
+        for detail in &mut self.smtp_details {
+            if detail.password == REDACTED {
+                if let Some(old) = old_details.get(detail.id.as_str()) {
+                    detail.password = (*old).to_string();
                 }
             }
         }
@@ -1328,9 +1386,9 @@ impl Config {
                 "server.max_connections must be at least 1".to_string(),
             ));
         }
-        if self.server.require_auth && self.server.auth_users.is_empty() {
+        if self.server.require_auth && self.server.auth_users.is_empty() && self.smtp_details.is_empty() {
             return Err(invalid(
-                "server.require_auth is enabled but server.auth_users is empty, so no client could ever submit mail"
+                "server.require_auth is enabled but server.auth_users and smtp_details are empty, so no client could ever submit mail"
                     .to_string(),
             ));
         }
@@ -1338,6 +1396,13 @@ impl Config {
             if user.username.is_empty() || user.password.is_empty() {
                 return Err(invalid(
                     "server.auth_users entries need a non-empty username and password".to_string(),
+                ));
+            }
+        }
+        for detail in &self.smtp_details {
+            if detail.username.trim().is_empty() || detail.password.trim().is_empty() {
+                return Err(invalid(
+                    "smtp_details entries need a non-empty username and password".to_string(),
                 ));
             }
         }

@@ -285,6 +285,7 @@
     <div class="tabs" id="tabs">
       <button data-tab="messages" class="active">Recent messages</button>
       <button data-tab="queue">Retry queue</button>
+      <button data-tab="smtp-details">SMTP Details</button>
       <button data-tab="rotation">Content rotation</button>
       <button data-tab="validation">Address check</button>
       <button data-tab="config">Configuration</button>
@@ -444,6 +445,44 @@
         </div>
       </div>
     </div>
+
+    <div class="panel hidden" id="tab-smtp-details">
+      <div class="panel-head">
+        <strong>SMTP Details (Inbound Credentials)</strong>
+        <span class="sub" style="color:var(--muted);font-size:12px" id="smtp-details-count">0 profiles</span>
+        <span class="pill ok" id="smtp-live-port-badge" style="margin-left:6px">Live Port: …</span>
+        <div class="spacer"></div>
+        <button class="primary" id="btn-add-smtp-detail">Create SMTP Details</button>
+      </div>
+      <div class="panel-body">
+        <div class="template-card" style="margin-bottom:14px;background:var(--panel-2)">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+            <div>
+              <strong style="display:block;font-size:13px;margin-bottom:3px">Connection Instructions</strong>
+              <span style="color:var(--muted);font-size:12px">
+                Configure your mailer or application with the host, live port, and credentials below to route emails through this SMTP relay.
+              </span>
+            </div>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+              <div class="card" style="padding:7px 12px;background:var(--panel)">
+                <div class="label">Server Host</div>
+                <div style="font-size:13px;font-weight:600" class="mono" id="smtp-info-host">—</div>
+              </div>
+              <div class="card" style="padding:7px 12px;background:var(--panel)">
+                <div class="label">Live SMTP Port</div>
+                <div style="font-size:14px;font-weight:700;color:var(--ok)" class="mono" id="smtp-info-port">—</div>
+              </div>
+              <div class="card" style="padding:7px 12px;background:var(--panel)">
+                <div class="label">Authentication</div>
+                <div style="font-size:13px;font-weight:600" class="mono">LOGIN / PLAIN</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="smtp-details-table"></div>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -457,6 +496,20 @@
         <div class="row"><span>Provider id</span><input type="text" id="relay-id" placeholder="relay_node_1" required></div>
         <div class="row"><span>Enabled</span>
           <label class="inline" style="margin-top:8px"><input type="checkbox" id="relay-enabled" checked> Active in the pool</label>
+        </div>
+        <div class="row" style="grid-column:1/-1">
+          <span>Associated SMTP Details</span>
+          <select id="relay-smtp-detail">
+            <option value="">None / Any (General Rotation Pool)</option>
+          </select>
+          <span style="font-size:11.5px;color:var(--muted)">Select which SMTP details profile routes to this provider (shows Label and Hostname).</span>
+        </div>
+        <div class="row" style="grid-column:1/-1">
+          <span>Rotation Pool</span>
+          <label class="inline" style="margin-top:4px">
+            <input type="checkbox" id="relay-in-rotation" checked>
+            In Rotation Pool (Default ON. Uncheck to keep this relay dedicated or standby)
+          </label>
         </div>
         <div class="row"><span>SMTP host</span><input type="text" id="relay-host" placeholder="smtp.example.com" required></div>
         <div class="row"><span>Port</span><input type="text" id="relay-port" value="465" required></div>
@@ -564,6 +617,60 @@
   </div>
 </dialog>
 
+<dialog id="smtp-detail-dialog">
+  <div class="panel-head"><strong id="smtp-detail-dialog-title">Create SMTP Details</strong></div>
+  <form id="smtp-detail-form">
+    <div class="panel-body">
+      <input type="hidden" id="smtp-detail-editing" value="">
+      <div class="row">
+        <span>Label (optional)</span>
+        <input type="text" id="smtp-detail-label" placeholder="e.g. Campaign-1, Marketing, or Client-A">
+        <span style="font-size:11.5px;color:var(--muted)">An optional label to identify this SMTP profile in the server dropdown.</span>
+      </div>
+      <div class="row">
+        <span>Hostname</span>
+        <input type="text" id="smtp-detail-hostname" placeholder="e.g. smtp.yourdomain.com">
+        <span style="font-size:11.5px;color:var(--muted)">Hostname field for your sending application or matching EHLO domain.</span>
+      </div>
+      <div class="grid-2">
+        <div class="row">
+          <span>Username</span>
+          <input type="text" id="smtp-detail-username" placeholder="SMTP login username" required autocomplete="off">
+        </div>
+        <div class="row">
+          <span>Password</span>
+          <input type="password" id="smtp-detail-password" placeholder="SMTP password" required autocomplete="new-password">
+        </div>
+      </div>
+
+      <!-- Auto show live port -->
+      <div class="row" style="background:var(--panel-2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:4px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <span style="font-size:11px;text-transform:uppercase;color:var(--muted);font-weight:600;letter-spacing:0.05em">Live SMTP Port</span>
+            <div style="font-size:22px;font-weight:700;color:var(--ok);margin-top:2px" class="mono" id="smtp-detail-port-display">1025</div>
+          </div>
+          <div style="text-align:right">
+            <span class="pill ok">Active &amp; Listening</span>
+            <div style="font-size:11.5px;color:var(--muted);margin-top:4px" class="mono" id="smtp-detail-bind-display">0.0.0.0:1025</div>
+          </div>
+        </div>
+        <div style="font-size:12px;color:var(--muted);margin-top:8px;border-top:1px solid var(--border);padding-top:8px">
+          Your email sending application will connect to port <strong id="smtp-detail-port-notice" style="color:var(--text)">1025</strong> with the username &amp; password above.
+        </div>
+      </div>
+
+      <div class="err" id="smtp-detail-error"></div>
+    </div>
+    <div class="actions">
+      <button type="button" class="danger hidden" id="smtp-detail-delete">Delete</button>
+      <div class="spacer"></div>
+      <button type="button" id="smtp-detail-cancel">Cancel</button>
+      <button type="submit" class="primary" id="smtp-detail-save">Save SMTP Details</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="detail-dialog">
   <div class="panel-head">
     <strong id="detail-title">Details</strong>
@@ -652,6 +759,10 @@ const STATUS_KIND = {
 // --- state ------------------------------------------------------------------
 let STATUS = null;
 let RELAYS = [];
+let SMTP_DETAILS = [];
+let SMTP_PORT = 1025;
+let SERVER_BIND = "";
+let SERVER_HOSTNAME = "";
 const selected = new Set();
 let currentTab = "messages";
 const MESSAGE_PAGE_SIZE = 50;
@@ -811,11 +922,18 @@ function renderRelays() {
     const cooldown = relay.cooldown_remaining_seconds
       ? `<div style="color:var(--muted);font-size:11px">retry in ${relay.cooldown_remaining_seconds}s</div>`
       : "";
+    const detail = relay.smtp_detail_id ? SMTP_DETAILS.find((d) => d.id === relay.smtp_detail_id) : null;
+    const detailBadge = relay.smtp_detail_id
+      ? `<span class="pill" style="background:#1e293b;border:1px solid #334155;color:#93c5fd;font-size:11px;margin-left:6px" title="Associated SMTP Detail: ${escapeHtml(detail ? (detail.label || detail.hostname || detail.username) : relay.smtp_detail_id)}">🏷️ ${escapeHtml(detail ? (detail.label || detail.hostname || detail.username) : relay.smtp_detail_id)}</span>`
+      : "";
+    const poolBadge = relay.in_rotation_pool === false
+      ? `<span class="pill warn" style="font-size:10.5px;margin-left:5px" title="Excluded from rotation pool">No-Pool</span>`
+      : "";
 
     return `<tr>
       <td><input type="checkbox" class="relay-check" data-id="${escapeHtml(relay.id)}" ${checked}></td>
       <td>
-        <div><strong>${escapeHtml(relay.id)}</strong></div>
+        <div><strong>${escapeHtml(relay.id)}</strong>${detailBadge}${poolBadge}</div>
         <div class="mono" style="color:var(--muted);font-size:11.5px">${escapeHtml(relay.host)}:${relay.port} · ${escapeHtml(relay.tls)}${relay.has_auth ? " · auth" : ""}</div>
       </td>
       <td class="mono" style="font-size:11.5px">${escapeHtml(relay.from_address)}${relay.align_envelope ? "<br><span style='color:var(--muted)'>SPF aligned</span>" : ""}</td>
@@ -855,7 +973,7 @@ function renderRelays() {
       <div class="relay-card-top">
         <input type="checkbox" class="relay-check" data-id="${escapeHtml(relay.id)}" ${checked}>
         <div style="flex:1;min-width:0">
-          <div><strong>${escapeHtml(relay.id)}</strong> ${relayStatusPill(relay)}</div>
+          <div><strong>${escapeHtml(relay.id)}</strong> ${relayStatusPill(relay)}${detailBadge}${poolBadge}</div>
           <div class="relay-card-meta mono">${escapeHtml(relay.host)}:${relay.port} · ${escapeHtml(relay.tls)}</div>
           <div class="mono" style="font-size:12px">${escapeHtml(relay.from_address)}</div>
         </div>
@@ -1019,6 +1137,8 @@ async function loadTab(reason) {
   } else if (currentTab === "rotation") {
     if (rotationDrawn) return;
     await loadRotation();
+  } else if (currentTab === "smtp-details") {
+    await loadSmtpDetails();
   } else if (currentTab === "validation") {
     if (validationDrawn) return;
     await loadValidation();
@@ -1046,8 +1166,8 @@ async function refreshAll(force) {
   if (refreshing) return;
   refreshing = true;
   try {
-    const jobs = [loadStatus(), loadRelays()];
-    if (currentTab !== "rotation" && currentTab !== "validation") jobs.push(loadTab("refresh"));
+    const jobs = [loadStatus(), loadRelays(), loadSmtpDetails()];
+    if (currentTab !== "rotation" && currentTab !== "validation" && currentTab !== "smtp-details") jobs.push(loadTab("refresh"));
     await Promise.all(jobs);
   } catch (error) {
     toast(error.message, "bad");
@@ -1688,7 +1808,7 @@ $("tabs").addEventListener("click", (event) => {
   if (!button) return;
   currentTab = button.dataset.tab;
   for (const tab of $("tabs").querySelectorAll("button")) tab.classList.toggle("active", tab === button);
-  for (const name of ["messages", "queue", "rotation", "validation", "config"]) $("tab-" + name).classList.toggle("hidden", name !== currentTab);
+  for (const name of ["messages", "queue", "smtp-details", "rotation", "validation", "config"]) $("tab-" + name).classList.toggle("hidden", name !== currentTab);
   loadTab().catch((error) => toast(error.message, "bad"));
 });
 
@@ -1815,6 +1935,8 @@ function openRelayDialog(relay, clone) {
   $("relay-day").value = relay && relay.day_limit ? relay.day_limit : "";
   $("relay-desc").value = relay && relay.description ? relay.description : "";
   $("relay-insecure-tls").checked = relay ? !!relay.allow_invalid_certs : false;
+  populateRelaySmtpDetailsDropdown(relay ? (relay.smtp_detail_id || "") : "");
+  $("relay-in-rotation").checked = relay ? relay.in_rotation_pool !== false : true;
   $("relay-form-error").textContent = "";
   $("relay-delete").classList.toggle("hidden", !editing);
   syncFromSame();
@@ -1848,6 +1970,8 @@ function relayPayload() {
     max_per_minute: $("relay-limit-minute").checked ? optionalNumber($("relay-minute").value) : null,
     max_per_hour: $("relay-limit-hour").checked ? optionalNumber($("relay-hour").value) : null,
     max_per_day: $("relay-limit-day").checked ? optionalNumber($("relay-day").value) : null,
+    smtp_detail_id: $("relay-smtp-detail").value.trim() || null,
+    in_rotation_pool: $("relay-in-rotation").checked,
   };
   if (username && (password || $("relay-editing").value || cloneFrom)) {
     payload.auth = {
@@ -1992,6 +2116,183 @@ $("relay-delete").onclick = async () => {
     $("relay-form-error").textContent = error.message;
   }
 };
+
+// --- smtp details -----------------------------------------------------------
+function populateRelaySmtpDetailsDropdown(selectedId) {
+  const select = $("relay-smtp-detail");
+  if (!select) return;
+  let html = '<option value="">None / Any (General Rotation Pool)</option>';
+  for (const d of SMTP_DETAILS) {
+    const labelText = d.label ? `[${d.label}] ` : "";
+    const hostText = d.hostname ? d.hostname : (d.username || d.id);
+    const title = `${labelText}${hostText} (User: ${d.username})`;
+    const isSel = selectedId === d.id ? " selected" : "";
+    html += `<option value="${escapeHtml(d.id)}"${isSel}>${escapeHtml(title)}</option>`;
+  }
+  select.innerHTML = html;
+}
+
+async function loadSmtpDetails() {
+  try {
+    const payload = await api("/api/smtp-details");
+    SMTP_DETAILS = payload.details || [];
+    SMTP_PORT = payload.smtp_port || 1025;
+    SERVER_BIND = payload.bind_address || "";
+    SERVER_HOSTNAME = payload.server_hostname || "";
+    renderSmtpDetails();
+    populateRelaySmtpDetailsDropdown();
+  } catch (error) {
+    console.error("Failed to load smtp-details:", error);
+  }
+}
+
+function renderSmtpDetails() {
+  const count = SMTP_DETAILS.length;
+  if ($("smtp-details-count")) $("smtp-details-count").textContent = count + " profile" + (count === 1 ? "" : "s");
+  if ($("smtp-live-port-badge")) $("smtp-live-port-badge").textContent = "Live Port: " + SMTP_PORT;
+  if ($("smtp-info-host")) $("smtp-info-host").textContent = SERVER_HOSTNAME || window.location.hostname || "localhost";
+  if ($("smtp-info-port")) $("smtp-info-port").textContent = SMTP_PORT;
+  if ($("smtp-detail-port-display")) $("smtp-detail-port-display").textContent = SMTP_PORT;
+  if ($("smtp-detail-bind-display")) $("smtp-detail-bind-display").textContent = SERVER_BIND || ("0.0.0.0:" + SMTP_PORT);
+  if ($("smtp-detail-port-notice")) $("smtp-detail-port-notice").textContent = SMTP_PORT;
+
+  if (!$("smtp-details-table")) return;
+
+  if (!SMTP_DETAILS.length) {
+    $("smtp-details-table").innerHTML = '<div class="empty">No SMTP details created yet. Click <strong>Create SMTP Details</strong> above to configure inbound credentials.</div>';
+    return;
+  }
+
+  const rows = SMTP_DETAILS.map((d) => {
+    const linkedRelays = RELAYS.filter((r) => r.smtp_detail_id === d.id);
+    const linkedRelaysText = linkedRelays.length > 0
+      ? linkedRelays.map((r) => `<span class="pill" style="background:#1d2939;font-size:11px">${escapeHtml(r.id)}</span>`).join(" ")
+      : '<span style="color:var(--muted);font-size:11.5px">None (routes via general pool)</span>';
+
+    return `<tr>
+      <td>
+        <strong style="font-size:13px">${escapeHtml(d.label || "(No label)")}</strong>
+        ${d.label ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">ID: ${escapeHtml(d.id)}</div>` : ""}
+      </td>
+      <td class="mono" style="font-size:12px;color:var(--accent)">${escapeHtml(d.hostname || "—")}</td>
+      <td class="mono" style="font-size:12px"><strong>${escapeHtml(d.username)}</strong></td>
+      <td class="mono" style="font-size:12px;color:var(--muted)">••••••••</td>
+      <td class="mono" style="font-size:12px;font-weight:600;color:var(--ok)">${SMTP_PORT}</td>
+      <td>${linkedRelaysText}</td>
+      <td style="white-space:nowrap;text-align:right">
+        <button class="tiny" data-smtp-act="edit" data-id="${escapeHtml(d.id)}">Edit</button>
+        <button class="tiny danger" data-smtp-act="delete" data-id="${escapeHtml(d.id)}">Delete</button>
+      </td>
+    </tr>`;
+  }).join("");
+
+  $("smtp-details-table").innerHTML = `<div class="table-wrap desktop-table"><table>
+    <thead><tr>
+      <th>Label</th><th>Hostname</th><th>Username</th><th>Password</th>
+      <th>Live Port</th><th>Linked Relays</th><th style="text-align:right">Actions</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function openSmtpDetailDialog(detail) {
+  const editing = !!detail;
+  $("smtp-detail-dialog-title").textContent = editing ? "Edit SMTP Details" : "Create SMTP Details";
+  $("smtp-detail-editing").value = editing ? detail.id : "";
+  $("smtp-detail-label").value = detail ? (detail.label || "") : "";
+  $("smtp-detail-hostname").value = detail ? (detail.hostname || "") : "";
+  $("smtp-detail-username").value = detail ? detail.username : "";
+  $("smtp-detail-password").value = "";
+  $("smtp-detail-password").placeholder = editing
+    ? "leave blank to keep current password"
+    : "SMTP password";
+  $("smtp-detail-password").required = !editing;
+  $("smtp-detail-port-display").textContent = SMTP_PORT;
+  $("smtp-detail-bind-display").textContent = SERVER_BIND || ("0.0.0.0:" + SMTP_PORT);
+  $("smtp-detail-port-notice").textContent = SMTP_PORT;
+  $("smtp-detail-error").textContent = "";
+  $("smtp-detail-delete").classList.toggle("hidden", !editing);
+  $("smtp-detail-dialog").showModal();
+  $("smtp-detail-label").focus();
+}
+
+$("btn-add-smtp-detail").onclick = () => openSmtpDetailDialog(null);
+$("smtp-detail-cancel").onclick = () => $("smtp-detail-dialog").close();
+
+$("smtp-detail-form").onsubmit = async (event) => {
+  event.preventDefault();
+  $("smtp-detail-error").textContent = "";
+  const editing = $("smtp-detail-editing").value;
+  const username = $("smtp-detail-username").value.trim();
+  const password = $("smtp-detail-password").value;
+  const label = $("smtp-detail-label").value.trim() || null;
+  const hostname = $("smtp-detail-hostname").value.trim() || null;
+
+  if (!username) {
+    $("smtp-detail-error").textContent = "Username is required.";
+    return;
+  }
+  if (!editing && !password) {
+    $("smtp-detail-error").textContent = "Password is required for new SMTP details.";
+    return;
+  }
+
+  const payload = {
+    label,
+    hostname,
+    username,
+    password: password || "__redacted__",
+  };
+
+  $("smtp-detail-save").disabled = true;
+  try {
+    const path = editing
+      ? "/api/smtp-details/" + encodeURIComponent(editing)
+      : "/api/smtp-details";
+    await api(path, {
+      method: editing ? "PUT" : "POST",
+      body: JSON.stringify(payload),
+    });
+    toast(editing ? "SMTP details updated" : "SMTP details created", "ok");
+    $("smtp-detail-dialog").close();
+    await refreshAll(true);
+  } catch (error) {
+    $("smtp-detail-error").textContent = error.message;
+    toast(error.message, "bad");
+  } finally {
+    $("smtp-detail-save").disabled = false;
+  }
+};
+
+$("smtp-detail-delete").onclick = async () => {
+  const id = $("smtp-detail-editing").value;
+  if (!id || !confirm("Delete this SMTP details profile? Any relays assigned to it will revert to the general pool.")) return;
+  try {
+    await api("/api/smtp-details/" + encodeURIComponent(id), { method: "DELETE" });
+    toast("SMTP details deleted", "ok");
+    $("smtp-detail-dialog").close();
+    await refreshAll(true);
+  } catch (error) {
+    $("smtp-detail-error").textContent = error.message;
+  }
+};
+
+$("smtp-details-table").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-smtp-act]");
+  if (!button) return;
+  const id = button.dataset.id;
+  const detail = SMTP_DETAILS.find((d) => d.id === id);
+  if (button.dataset.smtpAct === "edit") {
+    if (detail) openSmtpDetailDialog(detail);
+  } else if (button.dataset.smtpAct === "delete") {
+    if (!confirm("Delete SMTP details `" + (detail ? (detail.label || detail.username) : id) + "`?")) return;
+    try {
+      await api("/api/smtp-details/" + encodeURIComponent(id), { method: "DELETE" });
+      toast("SMTP details deleted", "ok");
+      await refreshAll(true);
+    } catch (error) {
+      toast(error.message, "bad");
+    }
+  }
+});
 
 $("login-card").onsubmit = async (event) => {
   event.preventDefault();

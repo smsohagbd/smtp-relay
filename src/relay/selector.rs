@@ -27,6 +27,10 @@ pub struct RouteRequest<'a> {
     pub recipients: &'a [String],
     /// Relay ids already attempted for this message.
     pub exclude: &'a [String],
+    /// Authenticated username of inbound session, if any.
+    pub auth_user: Option<&'a str>,
+    /// Inbound HELO/EHLO host.
+    pub helo: &'a str,
 }
 
 /// The chosen relay and the rule that chose it.
@@ -66,19 +70,131 @@ pub fn select(pool: &Pool, request: &RouteRequest<'_>) -> Result<Route, NoRouteA
         });
     }
 
-    let mut candidates: Vec<usize> = pool
-        .relays()
-        .iter()
-        .enumerate()
-        .filter(|(_, relay)| relay.is_eligible())
-        .filter(|(_, relay)| !request.exclude.iter().any(|id| id == relay.id()))
-        .map(|(position, _)| position)
-        .collect();
+    // -- 0. SMTP Detail matching ------------------------------------------
+    let sender_domain = address_domain(request.sender);
+    let matched_detail = pool.smtp_details.iter().find(|detail| {
+        if let Some(user) = request.auth_user {
+            if !user.is_empty() && detail.username.eq_ignore_ascii_case(user) {
+                return true;
+            }
+        }
+        if !detail.hostname.is_empty() {
+            if !request.helo.is_empty() && detail.hostname.eq_ignore_ascii_case(request.helo) {
+                return true;
+            }
+            if !sender_domain.is_empty() && detail.hostname.eq_ignore_ascii_case(sender_domain) {
+                return true;
+            }
+        }
+        if !detail.label.is_empty() && !request.helo.is_empty() && detail.label.eq_ignore_ascii_case(request.helo) {
+            return true;
+        }
+        false
+    });
+
+    let (mut candidates, is_detail_bound) = if let Some(detail) = matched_detail {
+        let linked: Vec<usize> = pool
+            .relays()
+            .iter()
+            .enumerate()
+            .filter(|(_, relay)| {
+                relay.config.smtp_detail_id.as_deref() == Some(&detail.id)
+                    || (!detail.label.is_empty() && relay.config.smtp_detail_id.as_deref() == Some(&detail.label))
+                    || (!detail.hostname.is_empty() && relay.config.smtp_detail_id.as_deref() == Some(&detail.hostname))
+            })
+            .map(|(position, _)| position)
+            .collect();
+
+        if !linked.is_empty() {
+            let eligible_linked: Vec<usize> = linked
+                .into_iter()
+                .filter(|&pos| pool.relays()[pos].is_eligible())
+                .filter(|&pos| !request.exclude.iter().any(|id| id == pool.relays()[pos].id()))
+                .collect();
+
+            let in_pool: Vec<usize> = eligible_linked
+                .iter()
+                .copied()
+                .filter(|&pos| pool.relays()[pos].config.in_rotation_pool)
+                .collect();
+
+            let res = if !in_pool.is_empty() {
+                in_pool
+            } else {
+                eligible_linked
+            };
+
+            if res.is_empty() {
+                return Err(NoRouteAvailable {
+                    message: format!(
+                        "no eligible relay for SMTP detail `{}` ({})",
+                        if detail.label.is_empty() { &detail.hostname } else { &detail.label },
+                        detail.username
+                    ),
+                });
+            }
+            (res, true)
+        } else {
+            let pool_relays: Vec<usize> = pool
+                .relays()
+                .iter()
+                .enumerate()
+                .filter(|(_, relay)| relay.config.in_rotation_pool && relay.config.smtp_detail_id.is_none())
+                .filter(|(_, relay)| relay.is_eligible())
+                .filter(|(_, relay)| !request.exclude.iter().any(|id| id == relay.id()))
+                .map(|(position, _)| position)
+                .collect();
+
+            if pool_relays.is_empty() {
+                (
+                    pool.relays()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, relay)| relay.is_eligible())
+                        .filter(|(_, relay)| !request.exclude.iter().any(|id| id == relay.id()))
+                        .map(|(position, _)| position)
+                        .collect(),
+                    false,
+                )
+            } else {
+                (pool_relays, false)
+            }
+        }
+    } else {
+        let pool_relays: Vec<usize> = pool
+            .relays()
+            .iter()
+            .enumerate()
+            .filter(|(_, relay)| relay.config.in_rotation_pool && relay.config.smtp_detail_id.is_none())
+            .filter(|(_, relay)| relay.is_eligible())
+            .filter(|(_, relay)| !request.exclude.iter().any(|id| id == relay.id()))
+            .map(|(position, _)| position)
+            .collect();
+
+        if pool_relays.is_empty() {
+            (
+                pool.relays()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, relay)| relay.is_eligible())
+                    .filter(|(_, relay)| !request.exclude.iter().any(|id| id == relay.id()))
+                    .map(|(position, _)| position)
+                    .collect(),
+                false,
+            )
+        } else {
+            (pool_relays, false)
+        }
+    };
 
     if candidates.is_empty() {
         return Err(NoRouteAvailable {
             message: explain_empty(pool, request),
         });
+    }
+
+    if is_detail_bound && candidates.len() == 1 {
+        return Ok(route(pool, candidates[0], "smtp_detail"));
     }
 
     // -- 1. domain overrides ---------------------------------------------
@@ -304,6 +420,8 @@ mod tests {
             sender: "campaigns@acme.io",
             recipients,
             exclude,
+            auth_user: None,
+            helo: "",
         }
     }
 
@@ -580,6 +698,8 @@ mod tests {
                     sender: &sender,
                     recipients: &recipients,
                     exclude: &exclude,
+                    auth_user: None,
+                    helo: "",
                 },
             )
             .unwrap();
@@ -711,5 +831,71 @@ mod tests {
         let percentages = pool.weight_percentages();
         assert!((percentages["forty"] - 100.0).abs() < 0.001);
         assert_eq!(percentages["sixty"], 0.0);
+    }
+
+    #[test]
+    fn smtp_detail_routing_matches_and_selects_linked_relay() {
+        let mut r1 = relay("relay_a", 1, 100);
+        r1.smtp_detail_id = Some("campaign1".to_string());
+        let mut r2 = relay("relay_b", 1, 100);
+        r2.smtp_detail_id = Some("campaign2".to_string());
+
+        let detail1 = crate::config::SmtpDetail {
+            id: "campaign1".to_string(),
+            label: "Campaign Alpha".to_string(),
+            hostname: "alpha.mail.test".to_string(),
+            username: "user_alpha".to_string(),
+            password: "password123".to_string(),
+        };
+
+        let config = Config {
+            relays: vec![r1, r2],
+            smtp_details: vec![detail1],
+            routing: RoutingConfig::default(),
+            ..Default::default()
+        };
+        let pool = Pool::build(&config).unwrap();
+
+        let recipients = vec!["lead@example.org".to_string()];
+        let exclude: Vec<String> = Vec::new();
+
+        // 1. Match by auth_user
+        let req_auth = RouteRequest {
+            sender: "noreply@somewhere.com",
+            recipients: &recipients,
+            exclude: &exclude,
+            auth_user: Some("user_alpha"),
+            helo: "random.host",
+        };
+        let route = select(&pool, &req_auth).unwrap();
+        assert_eq!(route.relay.id(), "relay_a");
+
+        // 2. Match by helo
+        let req_helo = RouteRequest {
+            sender: "noreply@somewhere.com",
+            recipients: &recipients,
+            exclude: &exclude,
+            auth_user: None,
+            helo: "alpha.mail.test",
+        };
+        let route_helo = select(&pool, &req_helo).unwrap();
+        assert_eq!(route_helo.relay.id(), "relay_a");
+    }
+
+    #[test]
+    fn relay_excluded_from_rotation_pool_is_skipped_in_general_pool() {
+        let mut r1 = relay("normal_relay", 1, 100);
+        r1.in_rotation_pool = true;
+        let mut r2 = relay("standby_relay", 1, 100);
+        r2.in_rotation_pool = false; // excluded from rotation
+
+        let pool = pool_with(vec![r1, r2], RoutingConfig::default());
+        let recipients = vec!["lead@example.org".to_string()];
+        let exclude: Vec<String> = Vec::new();
+
+        for _ in 0..10 {
+            let route = select(&pool, &request(&recipients, &exclude)).unwrap();
+            assert_eq!(route.relay.id(), "normal_relay");
+        }
     }
 }

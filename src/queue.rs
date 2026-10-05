@@ -37,6 +37,8 @@ pub struct QueuedMessage {
     /// Relays already tried, so retries prefer somewhere new.
     pub tried_relays: Vec<String>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub auth_user: Option<String>,
     /// The original RFC 5322 message. Spooled alongside the metadata rather
     /// than inside it, so the on-disk copy stays a readable `.eml`.
     #[serde(skip)]
@@ -512,6 +514,7 @@ mod tests {
             next_attempt_at: Utc::now(),
             tried_relays: Vec::new(),
             last_error: None,
+            auth_user: None,
             raw: b"From: a@b.io\r\n\r\nbody".to_vec(),
         }
     }

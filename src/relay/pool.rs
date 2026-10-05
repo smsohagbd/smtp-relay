@@ -582,6 +582,8 @@ impl RelayRuntime {
             tags: self.config.tags.clone(),
             username: self.config.auth.as_ref().map(|a| a.username.clone()),
             has_auth: self.config.auth.is_some(),
+            smtp_detail_id: self.config.smtp_detail_id.clone(),
+            in_rotation_pool: self.config.in_rotation_pool,
 
             weight: self.config.weight,
             weight_percent,
@@ -662,6 +664,8 @@ pub struct RelaySnapshot {
     pub tags: Vec<String>,
     pub username: Option<String>,
     pub has_auth: bool,
+    pub smtp_detail_id: Option<String>,
+    pub in_rotation_pool: bool,
 
     pub weight: u32,
     pub weight_percent: f64,
@@ -712,6 +716,7 @@ pub struct Pool {
     relays: Vec<Arc<RelayRuntime>>,
     index: HashMap<String, usize>,
     pub routing: RoutingConfig,
+    pub smtp_details: Vec<crate::config::SmtpDetail>,
     /// Cursor for `round_robin`.
     cursor: AtomicUsize,
     /// Current weights for smooth weighted round-robin, indexed like `relays`.
@@ -739,6 +744,7 @@ impl Pool {
             relays,
             index,
             routing: config.routing.clone(),
+            smtp_details: config.smtp_details.clone(),
             cursor: AtomicUsize::new(0),
             smooth_weights,
         })

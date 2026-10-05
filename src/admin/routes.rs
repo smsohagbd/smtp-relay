@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::admin::http::{HandlerFuture, Reply, Request, Response};
 use crate::config::{
-    AuthConfig, Config, RelayConfig, RotationConfig, StickyMode, Strategy, TlsMode,
+    AuthConfig, Config, RelayConfig, RotationConfig, SmtpDetail, StickyMode, Strategy, TlsMode,
     ValidationConfig, ValidationServer, YahooValidationConfig, REDACTED,
 };
 use crate::events::EventKind;
@@ -120,6 +120,12 @@ async fn route(state: Arc<AppState>, request: Request) -> Reply {
         ("POST", ["api", "relays", id, "test"]) => {
             send_test(&state, &request, id).await.into()
         }
+
+        // -- smtp-details --------------------------------------------------
+        ("GET", ["api", "smtp-details"]) => list_smtp_details(&state).into(),
+        ("POST", ["api", "smtp-details"]) => add_smtp_detail(&state, &request).into(),
+        ("PUT", ["api", "smtp-details", id]) => update_smtp_detail(&state, &request, id).into(),
+        ("DELETE", ["api", "smtp-details", id]) => delete_smtp_detail(&state, &request, id).into(),
 
         // -- routing -------------------------------------------------------
         ("GET", ["api", "routing"]) => routing(&state).into(),
@@ -402,12 +408,14 @@ fn status(state: &Arc<AppState>, request: &Request) -> Response {
             "tls_backend": tls_backend(),
             "server": {
                 "bind_address": config.server.bind_address,
+                "port": parse_bind_port(&config.server.bind_address),
                 "submission_mode": config.server.submission_mode.as_str(),
                 "max_message_size_mb": config.server.max_message_size_mb,
                 "timeout_seconds": config.server.timeout_seconds,
                 "max_connections": config.server.max_connections,
                 "auth_required": config.server.require_auth,
                 "auth_users": config.server.auth_users.len(),
+                "smtp_details": config.smtp_details.len(),
                 "allowed_networks": config.server.allowed_networks,
             },
             "routing": {
@@ -871,6 +879,11 @@ async fn add_relay(state: &Arc<AppState>, request: &Request) -> Response {
         apply_clone_password(&state.config(), source_id, &mut body.relay);
     }
     let mut relay = body.relay;
+    if let Some(detail_id) = &relay.smtp_detail_id {
+        if detail_id.trim().is_empty() {
+            relay.smtp_detail_id = None;
+        }
+    }
     relay.sync_from_identity();
 
     if state.pool().contains(&relay.id) {
@@ -1155,6 +1168,11 @@ async fn update_relay(state: &Arc<AppState>, request: &Request, id: &str) -> Res
             relay.auth = existing.auth;
         }
     }
+    if let Some(detail_id) = &relay.smtp_detail_id {
+        if detail_id.trim().is_empty() {
+            relay.smtp_detail_id = None;
+        }
+    }
     relay.sync_from_identity();
 
     if let Err(response) = verify_smtp(state, &relay).await {
@@ -1195,6 +1213,205 @@ fn delete_relay(state: &Arc<AppState>, request: &Request, id: &str) -> Response 
             list_relays(state)
         }
         Err(error) => Response::error(422, &error),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SMTP Details (Inbound profiles)
+// ---------------------------------------------------------------------------
+
+pub fn parse_bind_port(bind_address: &str) -> u16 {
+    if let Ok(addr) = bind_address.parse::<std::net::SocketAddr>() {
+        return addr.port();
+    }
+    bind_address
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(1025)
+}
+
+fn list_smtp_details(state: &Arc<AppState>) -> Response {
+    let config = state.config();
+    let port = parse_bind_port(&config.server.bind_address);
+    Response::json_value(
+        200,
+        &json!({
+            "smtp_port": port,
+            "bind_address": config.server.bind_address,
+            "server_hostname": config.server.hostname,
+            "details": config.smtp_details.iter().map(|d| {
+                json!({
+                    "id": d.id,
+                    "label": d.label,
+                    "hostname": if d.hostname.trim().is_empty() { &config.server.hostname } else { &d.hostname },
+                    "username": d.username,
+                    "password": REDACTED,
+                    "has_password": !d.password.is_empty(),
+                    "port": port,
+                })
+            }).collect::<Vec<_>>(),
+        }),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct SmtpDetailPayload {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    hostname: String,
+    username: String,
+    password: String,
+}
+
+fn add_smtp_detail(state: &Arc<AppState>, request: &Request) -> Response {
+    let payload: SmtpDetailPayload = match request.body_json() {
+        Ok(p) => p,
+        Err(err) => return Response::error(400, &err),
+    };
+    if payload.username.trim().is_empty() {
+        return Response::error(400, "username must not be empty");
+    }
+    if payload.password.trim().is_empty() || payload.password == REDACTED {
+        return Response::error(400, "password must not be empty");
+    }
+
+    let config = state.config();
+    let base_id = if let Some(id) = payload.id.filter(|s| !s.trim().is_empty()) {
+        slug_clean(&id)
+    } else if !payload.label.trim().is_empty() {
+        slug_clean(&payload.label)
+    } else {
+        slug_clean(&payload.username)
+    };
+    let mut detail_id = if base_id.is_empty() { "smtp".to_string() } else { base_id };
+    let mut counter = 2u32;
+    while config.smtp_details.iter().any(|d| d.id == detail_id) {
+        detail_id = format!("{}_{counter}", detail_id);
+        counter += 1;
+    }
+
+    let detail = SmtpDetail {
+        id: detail_id.clone(),
+        label: payload.label.trim().to_string(),
+        hostname: if payload.hostname.trim().is_empty() {
+            config.server.hostname.clone()
+        } else {
+            payload.hostname.trim().to_string()
+        },
+        username: payload.username.trim().to_string(),
+        password: payload.password.trim().to_string(),
+    };
+
+    match state.edit_config(should_persist(state, request), move |cfg| {
+        cfg.smtp_details.push(detail);
+    }) {
+        Ok(_) => {
+            tracing::info!(id = %detail_id, "SMTP details created");
+            state.events.publish(
+                EventKind::Config,
+                json!({ "action": "smtp_detail_added", "id": detail_id }),
+            );
+            list_smtp_details(state)
+        }
+        Err(error) => Response::error(422, &error),
+    }
+}
+
+fn update_smtp_detail(state: &Arc<AppState>, request: &Request, id: &str) -> Response {
+    let payload: SmtpDetailPayload = match request.body_json() {
+        Ok(p) => p,
+        Err(err) => return Response::error(400, &err),
+    };
+    if payload.username.trim().is_empty() {
+        return Response::error(400, "username must not be empty");
+    }
+
+    let existing = state.config().smtp_detail(id).cloned();
+    let Some(existing) = existing else {
+        return Response::error(404, &format!("no SMTP details with id `{id}`"));
+    };
+
+    let password = if payload.password.trim().is_empty() || payload.password == REDACTED {
+        existing.password
+    } else {
+        payload.password.trim().to_string()
+    };
+
+    let target_id = id.to_string();
+    let updated = SmtpDetail {
+        id: target_id.clone(),
+        label: payload.label.trim().to_string(),
+        hostname: if payload.hostname.trim().is_empty() {
+            existing.hostname
+        } else {
+            payload.hostname.trim().to_string()
+        },
+        username: payload.username.trim().to_string(),
+        password,
+    };
+
+    match state.edit_config(should_persist(state, request), move |cfg| {
+        if let Some(slot) = cfg.smtp_details.iter_mut().find(|d| d.id == target_id) {
+            *slot = updated;
+        }
+    }) {
+        Ok(_) => {
+            tracing::info!(id, "SMTP details updated");
+            state.events.publish(
+                EventKind::Config,
+                json!({ "action": "smtp_detail_updated", "id": id }),
+            );
+            list_smtp_details(state)
+        }
+        Err(error) => Response::error(422, &error),
+    }
+}
+
+fn delete_smtp_detail(state: &Arc<AppState>, request: &Request, id: &str) -> Response {
+    if state.config().smtp_detail(id).is_none() {
+        return Response::error(404, &format!("no SMTP details with id `{id}`"));
+    }
+    let target_id = id.to_string();
+    match state.edit_config(should_persist(state, request), move |cfg| {
+        cfg.smtp_details.retain(|d| d.id != target_id);
+        for relay in &mut cfg.relays {
+            if relay.smtp_detail_id.as_deref() == Some(&target_id) {
+                relay.smtp_detail_id = None;
+            }
+        }
+    }) {
+        Ok(_) => {
+            tracing::info!(id, "SMTP details deleted");
+            state.events.publish(
+                EventKind::Config,
+                json!({ "action": "smtp_detail_deleted", "id": id }),
+            );
+            list_smtp_details(state)
+        }
+        Err(error) => Response::error(422, &error),
+    }
+}
+
+fn slug_clean(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('_');
+    if cleaned.is_empty() {
+        "smtp".to_string()
+    } else {
+        cleaned.to_string()
     }
 }
 
