@@ -716,7 +716,7 @@ function authHeaders(extra) {
 }
 
 async function api(path, options) {
-  const config = Object.assign({ method: "GET", credentials: "same-origin" }, options || {});
+  const config = Object.assign({ method: "GET", credentials: "same-origin", cache: "no-store" }, options || {});
   config.headers = authHeaders(config.body ? { "Content-Type": "application/json" } : {});
 
   const response = await fetch(path, config);
@@ -1936,7 +1936,10 @@ function openRelayDialog(relay, clone) {
   $("relay-clone-from").value = clone && relay ? relay.id : "";
   $("relay-id").value = clone && relay ? nextCloneId(relay.id) : (relay ? relay.id : "");
   $("relay-id").readOnly = editing;
-  $("relay-enabled").checked = relay ? !!relay.active : true;
+  const isEnabled = relay
+    ? (relay.enabled !== false && relay.enabled !== "false" && relay.enabled !== 0 && relay.active !== false && relay.active !== "false")
+    : true;
+  $("relay-enabled").checked = isEnabled;
   $("relay-host").value = relay ? relay.host : "";
   $("relay-port").value = relay ? relay.port : 465;
   $("relay-tls").value = relay ? relay.tls : "tls";
@@ -1960,7 +1963,10 @@ function openRelayDialog(relay, clone) {
   $("relay-skip-test").checked = false;
   if ($("relay-force-save-wrap")) $("relay-force-save-wrap").classList.add("hidden");
   populateRelaySmtpDetailsDropdown(relay ? (relay.smtp_detail_id || "") : "");
-  $("relay-in-rotation").checked = relay ? relay.in_rotation_pool !== false : true;
+  const isRotationOn = relay
+    ? (relay.in_rotation_pool !== false && relay.in_rotation_pool !== "false" && relay.in_rotation_pool !== 0)
+    : true;
+  $("relay-in-rotation").checked = isRotationOn;
   $("relay-form-error").textContent = "";
   $("relay-delete").classList.toggle("hidden", !editing);
   syncFromSame();
@@ -2114,12 +2120,22 @@ $("relay-form").onsubmit = async (event) => {
     const path = editing
       ? "/api/relays/" + encodeURIComponent(editing)
       : "/api/relays";
-    await api(path, {
+    const result = await api(path, {
       method: editing ? "PUT" : "POST",
       body: JSON.stringify(payload),
     });
     toast(editing ? "Provider updated" : "SMTP provider added", "ok");
     $("relay-dialog").close();
+    if (result && Array.isArray(result.relays)) {
+      RELAYS = result.relays;
+      renderRelays();
+    } else if (result && result.id) {
+      const idx = RELAYS.findIndex((r) => r.id === result.id);
+      if (idx >= 0) RELAYS[idx] = result;
+      else RELAYS.push(result);
+      renderRelays();
+    }
+    refreshing = false;
     await refreshAll(true);
   } catch (error) {
     $("relay-form-error").textContent = error.message;

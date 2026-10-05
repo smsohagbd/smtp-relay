@@ -2183,7 +2183,8 @@ mod tests {
         }
     }
 
-    fn state_with_admin(admin: AdminConfig) -> Arc<AppState> {
+    fn state_with_admin(mut admin: AdminConfig) -> Arc<AppState> {
+        admin.allow_config_write = false;
         let config = Config {
             admin,
             relays: vec![crate::config::RelayConfig {
@@ -2374,5 +2375,57 @@ mod tests {
         assert_eq!(pipe.tls, TlsMode::StartTls);
         assert!(!pipe.from_same_as_username);
         assert_eq!(pipe.from_address, "news@example.com");
+    }
+
+    #[tokio::test]
+    async fn add_relay_preserves_in_rotation_pool_false() {
+        let state = state_with_admin(AdminConfig::default());
+        let req = Request {
+            method: "POST".to_string(),
+            path: "/api/relays".to_string(),
+            segments: vec!["api".to_string(), "relays".to_string()],
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: serde_json::to_vec(&serde_json::json!({
+                "id": "standby_node",
+                "host": "smtp.test.com",
+                "port": 465,
+                "tls": "tls",
+                "skip_test": true,
+                "in_rotation_pool": false
+            })).unwrap(),
+            peer: "127.0.0.1:9000".parse().unwrap(),
+        };
+        let response = add_relay(&state, &req).await;
+        assert_eq!(response.status, 200);
+        let relay = state.pool().get("standby_node").expect("relay exists");
+        assert_eq!(relay.config.in_rotation_pool, false);
+        let snap = relay.snapshot(0.0);
+        assert_eq!(snap.in_rotation_pool, false);
+    }
+
+    #[tokio::test]
+    async fn update_relay_preserves_in_rotation_pool_false() {
+        let state = state_with_admin(AdminConfig::default());
+        let req = Request {
+            method: "PUT".to_string(),
+            path: "/api/relays/one".to_string(),
+            segments: vec!["api".to_string(), "relays".to_string(), "one".to_string()],
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: serde_json::to_vec(&serde_json::json!({
+                "id": "one",
+                "host": "smtp.one.test",
+                "port": 465,
+                "tls": "tls",
+                "skip_test": true,
+                "in_rotation_pool": false
+            })).unwrap(),
+            peer: "127.0.0.1:9000".parse().unwrap(),
+        };
+        let response = update_relay(&state, &req, "one").await;
+        assert_eq!(response.status, 200);
+        let relay = state.pool().get("one").expect("relay exists");
+        assert_eq!(relay.config.in_rotation_pool, false);
     }
 }

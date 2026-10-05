@@ -101,16 +101,24 @@ impl Response {
     }
 
     pub fn json_value(status: u16, value: &serde_json::Value) -> Self {
-        Self::new(
+        let mut res = Self::new(
             status,
             "application/json; charset=utf-8",
             serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec()),
-        )
+        );
+        res.headers.push(("Cache-Control".to_string(), "no-cache, no-store, must-revalidate".to_string()));
+        res.headers.push(("Pragma".to_string(), "no-cache".to_string()));
+        res
     }
 
     pub fn json<T: serde::Serialize>(status: u16, value: &T) -> Self {
         match serde_json::to_vec(value) {
-            Ok(body) => Self::new(status, "application/json; charset=utf-8", body),
+            Ok(body) => {
+                let mut res = Self::new(status, "application/json; charset=utf-8", body);
+                res.headers.push(("Cache-Control".to_string(), "no-cache, no-store, must-revalidate".to_string()));
+                res.headers.push(("Pragma".to_string(), "no-cache".to_string()));
+                res
+            }
             Err(error) => Self::error(500, &format!("could not serialise the response: {error}")),
         }
     }
