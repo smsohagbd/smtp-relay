@@ -861,6 +861,8 @@ struct AddRelayBody {
     /// password is blank (used by Clone).
     #[serde(default)]
     clone_from: Option<String>,
+    #[serde(default)]
+    skip_test: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -868,6 +870,16 @@ struct ImportRelaysBody {
     /// One provider per line: `host:port:user:pass:ssl` or `|` separated.
     /// Optional sixth field is From: `host:port:user:pass:ssl:from@domain`.
     text: String,
+    #[serde(default)]
+    skip_test: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateRelayBody {
+    #[serde(flatten)]
+    relay: RelayConfig,
+    #[serde(default)]
+    skip_test: bool,
 }
 
 async fn add_relay(state: &Arc<AppState>, request: &Request) -> Response {
@@ -890,9 +902,13 @@ async fn add_relay(state: &Arc<AppState>, request: &Request) -> Response {
         return Response::error(409, &format!("a relay with id `{}` already exists", relay.id));
     }
 
-    let latency_ms = match verify_smtp(state, &relay).await {
-        Ok(ms) => ms,
-        Err(response) => return response,
+    let latency_ms = if body.skip_test {
+        0
+    } else {
+        match verify_smtp(state, &relay).await {
+            Ok(ms) => ms,
+            Err(response) => return response,
+        }
     };
 
     let id = relay.id.clone();
@@ -1078,17 +1094,21 @@ async fn import_relays(state: &Arc<AppState>, request: &Request) -> Response {
                     .map(|auth| auth.username.as_str())
                     .unwrap_or("");
                 relay.id = unique_relay_id(&mut taken, username, &relay.host);
-                match verify_smtp(state, &relay).await {
-                    Ok(_) => accepted.push(relay),
-                    Err(response) => {
-                        let message = String::from_utf8_lossy(&response.body).into_owned();
-                        let parsed: Value =
-                            serde_json::from_str(&message).unwrap_or(json!({ "error": message }));
-                        failed.push(json!({
-                            "line": index + 1,
-                            "text": line,
-                            "error": parsed.get("error").and_then(|v| v.as_str()).unwrap_or("SMTP test failed"),
-                        }));
+                if body.skip_test {
+                    accepted.push(relay);
+                } else {
+                    match verify_smtp(state, &relay).await {
+                        Ok(_) => accepted.push(relay),
+                        Err(response) => {
+                            let message = String::from_utf8_lossy(&response.body).into_owned();
+                            let parsed: Value =
+                                serde_json::from_str(&message).unwrap_or(json!({ "error": message }));
+                            failed.push(json!({
+                                "line": index + 1,
+                                "text": line,
+                                "error": parsed.get("error").and_then(|v| v.as_str()).unwrap_or("SMTP test failed"),
+                            }));
+                        }
                     }
                 }
             }
@@ -1131,10 +1151,11 @@ async fn import_relays(state: &Arc<AppState>, request: &Request) -> Response {
 }
 
 async fn update_relay(state: &Arc<AppState>, request: &Request, id: &str) -> Response {
-    let mut relay: RelayConfig = match request.body_json() {
-        Ok(relay) => relay,
+    let body: UpdateRelayBody = match request.body_json() {
+        Ok(b) => b,
         Err(error) => return Response::error(400, &error),
     };
+    let mut relay = body.relay;
 
     if !state.pool().contains(id) {
         return Response::error(404, &format!("no relay with id `{id}`"));
@@ -1175,8 +1196,10 @@ async fn update_relay(state: &Arc<AppState>, request: &Request, id: &str) -> Res
     }
     relay.sync_from_identity();
 
-    if let Err(response) = verify_smtp(state, &relay).await {
-        return response;
+    if !body.skip_test {
+        if let Err(response) = verify_smtp(state, &relay).await {
+            return response;
+        }
     }
 
     let target = id.to_string();

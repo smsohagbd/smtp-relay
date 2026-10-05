@@ -569,7 +569,17 @@
           Accept invalid TLS certificates (self-signed / hostname mismatch)
         </label>
       </div>
+      <div class="row" style="margin-top:8px">
+        <span>Connection Test</span>
+        <label class="inline" style="margin-top:8px">
+          <input type="checkbox" id="relay-skip-test">
+          Skip connection test (Force save without testing upstream connection)
+        </label>
+      </div>
       <div class="err" id="relay-form-error"></div>
+      <div id="relay-force-save-wrap" class="hidden" style="margin-top:8px">
+        <button type="button" class="warn" id="btn-force-save-relay" style="width:100%;padding:8px;font-weight:600">⚠️ Save anyway (Skip connection test)</button>
+      </div>
     </div>
     <div class="actions">
       <button type="button" class="danger hidden" id="relay-delete">Delete</button>
@@ -628,9 +638,9 @@
         <span style="font-size:11.5px;color:var(--muted)">An optional label to identify this SMTP profile in the server dropdown.</span>
       </div>
       <div class="row">
-        <span>Hostname</span>
-        <input type="text" id="smtp-detail-hostname" placeholder="e.g. smtp.yourdomain.com">
-        <span style="font-size:11.5px;color:var(--muted)">Hostname field for your sending application or matching EHLO domain.</span>
+        <span>Hostname (optional)</span>
+        <input type="text" id="smtp-detail-hostname" placeholder="e.g. smtp.yourdomain.com or leave blank">
+        <span style="font-size:11.5px;color:var(--muted)">Optional. You can connect using server IP or any subdomain. Leave blank if not needed.</span>
       </div>
       <div class="grid-2">
         <div class="row">
@@ -1935,6 +1945,8 @@ function openRelayDialog(relay, clone) {
   $("relay-day").value = relay && relay.day_limit ? relay.day_limit : "";
   $("relay-desc").value = relay && relay.description ? relay.description : "";
   $("relay-insecure-tls").checked = relay ? !!relay.allow_invalid_certs : false;
+  $("relay-skip-test").checked = false;
+  if ($("relay-force-save-wrap")) $("relay-force-save-wrap").classList.add("hidden");
   populateRelaySmtpDetailsDropdown(relay ? (relay.smtp_detail_id || "") : "");
   $("relay-in-rotation").checked = relay ? relay.in_rotation_pool !== false : true;
   $("relay-form-error").textContent = "";
@@ -1972,6 +1984,7 @@ function relayPayload() {
     max_per_day: $("relay-limit-day").checked ? optionalNumber($("relay-day").value) : null,
     smtp_detail_id: $("relay-smtp-detail").value.trim() || null,
     in_rotation_pool: $("relay-in-rotation").checked,
+    skip_test: $("relay-skip-test").checked,
   };
   if (username && (password || $("relay-editing").value || cloneFrom)) {
     payload.auth = {
@@ -2098,12 +2111,20 @@ $("relay-form").onsubmit = async (event) => {
     await refreshAll(true);
   } catch (error) {
     $("relay-form-error").textContent = error.message;
+    if ($("relay-force-save-wrap")) $("relay-force-save-wrap").classList.remove("hidden");
     toast(error.message, "bad");
   } finally {
     $("relay-save").disabled = false;
     $("relay-save").textContent = "Test & save";
   }
 };
+if ($("btn-force-save-relay")) {
+  $("btn-force-save-relay").onclick = () => {
+    $("relay-skip-test").checked = true;
+    if ($("relay-force-save-wrap")) $("relay-force-save-wrap").classList.add("hidden");
+    $("relay-save").click();
+  };
+}
 $("relay-delete").onclick = async () => {
   const id = $("relay-editing").value;
   if (!id || !confirm("Delete provider `" + id + "`? Mail will stop using it immediately.")) return;
