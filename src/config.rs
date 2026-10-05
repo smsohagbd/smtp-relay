@@ -390,6 +390,7 @@ impl ValidationConfig {
     }
 
     /// First Yahoo API, for Test and older single-URL callers.
+    #[allow(dead_code)]
     pub fn yahoo_http(&self) -> Option<YahooValidationConfig> {
         let endpoint = self.yahoo_endpoints().into_iter().next()?;
         Some(endpoint.as_config(&self.yahoo))
@@ -513,6 +514,7 @@ impl Default for YahooValidationConfig {
 }
 
 impl YahooValidationConfig {
+    #[allow(dead_code)]
     pub fn is_usable(&self) -> bool {
         self.enabled && !self.resolved_endpoints().is_empty()
     }

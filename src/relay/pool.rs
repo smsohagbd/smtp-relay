@@ -641,6 +641,7 @@ pub struct DeliveryGuard {
 
 impl Drop for DeliveryGuard {
     fn drop(&mut self) {
+        #[allow(deprecated)]
         let _ = self.relay.in_flight.fetch_update(
             Ordering::Relaxed,
             Ordering::Relaxed,

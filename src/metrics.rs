@@ -853,6 +853,7 @@ impl Metrics {
 
     pub fn connection_closed(&self) {
         // Saturating decrement: never wrap if open/close ever get unbalanced.
+        #[allow(deprecated)]
         let _ = self
             .counters
             .connections_active
