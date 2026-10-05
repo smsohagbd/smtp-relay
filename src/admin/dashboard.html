@@ -498,7 +498,7 @@
       <div class="grid-2">
         <div class="row"><span>Provider id</span><input type="text" id="relay-id" placeholder="relay_node_1" required></div>
         <div class="row"><span>Enabled</span>
-          <label class="inline" style="margin-top:8px"><input type="checkbox" id="relay-enabled" checked> Active in the pool</label>
+          <label class="inline" style="margin-top:8px"><input type="checkbox" id="relay-enabled" checked> Enabled (Send ready — Keep ON for both Dedicated and Pool relays)</label>
         </div>
         <div class="row" style="grid-column:1/-1">
           <span>Associated SMTP Details</span>
@@ -906,7 +906,13 @@ function renderChart(series) {
 
 // --- relays -----------------------------------------------------------------
 function relayStatusPill(relay) {
-  if (relay.eligible) return '<span class="pill ok">in rotation</span>';
+  if (relay.smtp_detail_id) {
+    if (relay.eligible) return '<span class="pill" style="background:#1e293b;border:1px solid #334155;color:#93c5fd">dedicated</span>';
+  } else if (relay.in_rotation_pool === false) {
+    if (relay.eligible) return '<span class="pill warn">standby</span>';
+  } else if (relay.eligible) {
+    return '<span class="pill ok">in rotation</span>';
+  }
   const reasons = {
     deactivated: '<span class="pill mute">deactivated</span>',
     circuit_open: '<span class="pill bad">circuit open</span>',
@@ -930,8 +936,8 @@ function relayBadges(relay) {
   const detailBadge = relay.smtp_detail_id
     ? `<span class="pill" style="background:#1e293b;border:1px solid #334155;color:#93c5fd;font-size:11px;margin-left:6px" title="Associated SMTP Detail: ${escapeHtml(detail ? (detail.label || detail.hostname || detail.username) : relay.smtp_detail_id)}">🏷️ ${escapeHtml(detail ? (detail.label || detail.hostname || detail.username) : relay.smtp_detail_id)}</span>`
     : "";
-  const poolBadge = relay.in_rotation_pool === false
-    ? `<span class="pill warn" style="font-size:10.5px;margin-left:5px" title="Excluded from rotation pool">No-Pool</span>`
+  const poolBadge = (relay.in_rotation_pool === false && !relay.smtp_detail_id)
+    ? `<span class="pill warn" style="font-size:10.5px;margin-left:5px" title="Excluded from rotation pool">Standby</span>`
     : "";
   return detailBadge + poolBadge;
 }
@@ -961,8 +967,11 @@ function renderRelays() {
       <td class="mono" style="font-size:11.5px">${relay.from_address ? escapeHtml(relay.from_address) : '<span style="color:var(--ok)">Dynamic (From app)</span>'}${relay.align_envelope ? "<br><span style='color:var(--muted)'>SPF aligned</span>" : ""}</td>
       <td>${relayStatusPill(relay)}${cooldown}${error}</td>
       <td class="num">
-        <div>${relay.weight_percent.toFixed(0)}%</div>
-        <div class="bar"><i style="width:${Math.min(100, relay.weight_percent)}%"></i></div>
+        ${relay.smtp_detail_id
+          ? `<span style="color:var(--muted);font-size:11.5px">dedicated</span>`
+          : relay.in_rotation_pool === false
+          ? `<span style="color:var(--muted);font-size:11.5px">standby</span>`
+          : `<div>${relay.weight_percent.toFixed(0)}%</div><div class="bar"><i style="width:${Math.min(100, relay.weight_percent)}%"></i></div>`}
       </td>
       <td class="num">${num(relay.sent)}</td>
       <td class="num">${num(relay.deferred)}</td>
@@ -2072,6 +2081,11 @@ $("import-save").onclick = async () => {
 };
 $("btn-add-relay").onclick = () => openRelayDialog(null);
 $("relay-cancel").onclick = () => $("relay-dialog").close();
+$("relay-smtp-detail").onchange = () => {
+  if ($("relay-smtp-detail").value) {
+    $("relay-in-rotation").checked = false;
+  }
+};
 $("relay-from-same").onchange = syncFromSame;
 $("relay-user").oninput = syncFromSame;
 $("relay-limit-minute").onchange = () => syncQuotaInput("relay-limit-minute", "relay-minute");

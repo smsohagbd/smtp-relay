@@ -859,19 +859,28 @@ impl Pool {
     // -- weights ----------------------------------------------------------
 
     /// Share of traffic each relay should receive, as a percentage of the
-    /// active pool.
+    /// active pool. Only relays participating in the active rotation pool
+    /// (not dedicated to a specific SMTP detail or excluded from rotation)
+    /// receive a share of general traffic.
     pub fn weight_percentages(&self) -> HashMap<String, f64> {
         let total: u64 = self
             .relays
             .iter()
-            .filter(|relay| relay.is_active())
+            .filter(|relay| {
+                relay.is_active()
+                    && relay.config.in_rotation_pool
+                    && relay.config.smtp_detail_id.is_none()
+            })
             .map(|relay| relay.config.weight as u64)
             .sum();
 
         self.relays
             .iter()
             .map(|relay| {
-                let percent = if !relay.is_active() || total == 0 {
+                let in_pool = relay.is_active()
+                    && relay.config.in_rotation_pool
+                    && relay.config.smtp_detail_id.is_none();
+                let percent = if !in_pool || total == 0 {
                     0.0
                 } else {
                     (relay.config.weight as f64 / total as f64) * 100.0
