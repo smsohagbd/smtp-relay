@@ -762,6 +762,22 @@ async fn send_test(state: &Arc<AppState>, request: &Request, id: &str) -> Respon
     let subject = payload
         .subject
         .unwrap_or_else(|| format!("smtp-relay test via {id}"));
+    let test_from = {
+        let eff = relay.config.effective_from_address();
+        if !eff.is_empty() {
+            eff
+        } else if let Some(auth) = &relay.config.auth {
+            let u = auth.username.trim();
+            if crate::util::looks_like_email(u) {
+                u.to_string()
+            } else {
+                format!("noreply@{}", relay.config.host)
+            }
+        } else {
+            format!("noreply@{}", relay.config.host)
+        }
+    };
+
     let body = payload.body.unwrap_or_else(|| {
         format!(
             "This is a test message sent through the `{id}` relay by smtp-relay {VERSION} on {}.\r\n\
@@ -769,7 +785,7 @@ async fn send_test(state: &Arc<AppState>, request: &Request, id: &str) -> Respon
              Envelope sender: {}\r\n\
              Relay endpoint:  {}\r\n",
             config.server.hostname,
-            relay.config.effective_from_address(),
+            test_from,
             relay.config.endpoint()
         )
     });
@@ -787,7 +803,7 @@ async fn send_test(state: &Arc<AppState>, request: &Request, id: &str) -> Respon
     let _slot = relay.begin_delivery();
     let result = sender::deliver(
         &relay,
-        &relay.config.effective_from_address(),
+        &test_from,
         &recipients,
         &raw,
     )

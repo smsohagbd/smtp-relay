@@ -249,7 +249,19 @@ pub fn build_test_message(
     body: &str,
     queue_id: &str,
 ) -> Vec<u8> {
-    let from_address = relay.effective_from_address();
+    let eff = relay.effective_from_address();
+    let from_address = if !eff.is_empty() {
+        eff
+    } else if let Some(auth) = &relay.auth {
+        let u = auth.username.trim();
+        if crate::util::looks_like_email(u) {
+            u.to_string()
+        } else {
+            format!("noreply@{}", relay.host)
+        }
+    } else {
+        format!("noreply@{}", relay.host)
+    };
     let from = crate::util::format_mailbox("SMTP Relay", &from_address);
     let domain = crate::util::address_domain(&from_address);
 

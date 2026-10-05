@@ -1451,10 +1451,11 @@ impl Config {
             if relay.port == 0 {
                 return Err(invalid(format!("{label}: port must be 1-65535")));
             }
-            if !looks_like_email(&relay.effective_from_address()) {
+            let effective_from = relay.effective_from_address();
+            if !effective_from.is_empty() && !looks_like_email(&effective_from) {
                 return Err(invalid(format!(
-                    "{label}: from_address `{}` is not a valid email address (set from_address, or enable from_same_as_username with an email username)",
-                    relay.effective_from_address()
+                    "{label}: from_address `{}` is not a valid email address (set from_address, enable from_same_as_username with an email username, or leave empty for dynamic From)",
+                    effective_from
                 )));
             }
             if relay.max_concurrent == 0 {
@@ -1702,6 +1703,15 @@ mod tests {
             config.relays[0].effective_from_address(),
             "mailer@one.com"
         );
+    }
+
+    #[test]
+    fn empty_from_address_allowed_for_dynamic_mode() {
+        let mut config = base_config();
+        config.relays[0].from_address.clear();
+        config.relays[0].from_same_as_username = false;
+        config.validate().expect("empty from_address is allowed for dynamic pass-through");
+        assert_eq!(config.relays[0].effective_from_address(), "");
     }
 
     #[test]

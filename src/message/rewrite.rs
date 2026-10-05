@@ -109,6 +109,7 @@ pub fn rewrite(raw: &[u8], ctx: &RewriteContext<'_>) -> Result<Rewritten, Messag
     // Only the address is rewritten. The original display name is kept unless
     // `preserve_display_name` is off; there is no per-relay name override.
     let identity = ctx.relay.effective_from_address();
+    let is_dynamic_from = identity.is_empty();
     let display_name = if ctx.rewrite.preserve_display_name {
         original_from
             .as_ref()
@@ -118,7 +119,7 @@ pub fn rewrite(raw: &[u8], ctx: &RewriteContext<'_>) -> Result<Rewritten, Messag
         String::new()
     };
 
-    let from_header = if ctx.rewrite.rewrite_from {
+    let from_header = if !is_dynamic_from && ctx.rewrite.rewrite_from {
         let rewritten = format_mailbox(&display_name, &identity);
         message.set("From", &rewritten);
 
@@ -131,6 +132,9 @@ pub fn rewrite(raw: &[u8], ctx: &RewriteContext<'_>) -> Result<Rewritten, Messag
             None => notes.push(format!("synthesised From {identity}")),
         }
         rewritten
+    } else if is_dynamic_from {
+        notes.push("kept original From (dynamic pass-through)".to_string());
+        original_from_raw.clone().unwrap_or_default()
     } else {
         original_from_raw.clone().unwrap_or_default()
     };
@@ -141,16 +145,20 @@ pub fn rewrite(raw: &[u8], ctx: &RewriteContext<'_>) -> Result<Rewritten, Messag
     // keeps the client's MAIL FROM (bounce path stays with the submitter).
     let align_envelope = ctx.rewrite.rewrite_from
         && (ctx.relay.align_envelope || ctx.relay.from_same_as_username);
-    let envelope_from = if align_envelope {
+    let envelope_from = if !is_dynamic_from && align_envelope {
         notes.push(format!("aligned MAIL FROM to {identity}"));
         identity.clone()
     } else if !ctx.original_sender.is_empty() && looks_like_email(ctx.original_sender) {
         ctx.original_sender.to_string()
-    } else {
+    } else if let Some(mailbox) = &original_from {
+        mailbox.address.clone()
+    } else if !identity.is_empty() {
         identity.clone()
+    } else {
+        format!("noreply@{}", ctx.hostname)
     };
 
-    if ctx.rewrite.rewrite_from {
+    if !is_dynamic_from && ctx.rewrite.rewrite_from {
         if message.has("sender") {
             let sender = format!("<{identity}>");
             message.set("Sender", &sender);
@@ -211,7 +219,15 @@ pub fn rewrite(raw: &[u8], ctx: &RewriteContext<'_>) -> Result<Rewritten, Messag
 
     let mut message_id = message.value("message-id").filter(|v| !v.trim().is_empty());
     if ctx.rewrite.ensure_message_id && message_id.is_none() {
-        let domain = crate::util::address_domain(&identity);
+        let domain = if !identity.is_empty() {
+            crate::util::address_domain(&identity)
+        } else if let Some(mailbox) = &original_from {
+            crate::util::address_domain(&mailbox.address)
+        } else if looks_like_email(ctx.original_sender) {
+            crate::util::address_domain(ctx.original_sender)
+        } else {
+            ctx.hostname
+        };
         let generated = format!("<{}@{}>", ctx.queue_id, domain);
         message.set("Message-ID", &generated);
         notes.push(format!("added Message-ID {generated}"));
@@ -674,5 +690,23 @@ Lz48L2JvZHk+PC9odG1sPg==\r\n\
             after.value("x-original-from").unwrap(),
             "Acme Marketing <campaigns@acme-mautic.io>"
         );
+    }
+
+    #[test]
+    fn dynamic_from_relay_preserves_original_from_and_envelope() {
+        let cfg = RewriteConfig::default();
+        let mut relay_cfg = relay();
+        relay_cfg.from_address.clear();
+        relay_cfg.from_same_as_username = false;
+
+        let result = rewrite(MAUTIC, &context(&cfg, &relay_cfg)).unwrap();
+        let after = Message::parse(&result.raw).unwrap();
+
+        assert_eq!(
+            after.value("from").unwrap(),
+            "Acme Marketing <campaigns@acme-mautic.io>"
+        );
+        assert_eq!(result.envelope_from, "campaigns@acme-mautic.io");
+        assert_eq!(result.from_header, "Acme Marketing <campaigns@acme-mautic.io>");
     }
 }

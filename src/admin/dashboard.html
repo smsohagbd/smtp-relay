@@ -531,12 +531,17 @@
           <span>From address</span>
           <label class="inline" style="margin-top:8px">
             <input type="checkbox" id="relay-from-same" checked>
-            Same as username (no extra From field)
+            Same as username (for mailbox logins)
           </label>
         </div>
         <div class="row hidden" id="relay-from-row">
           <span>From address</span>
-          <input type="email" id="relay-from" placeholder="noreply@example.com">
+          <div>
+            <input type="text" id="relay-from" placeholder="Leave blank for Dynamic (from app), or enter custom email">
+            <div style="font-size:11px;color:var(--muted);margin-top:4px">
+              Leave blank to dynamically keep whatever From address the app sends (e.g. AWS SES, Mailwizz, Mautic). Or type a fixed address.
+            </div>
+          </div>
         </div>
         <div class="row" style="grid-column:1/-1">
           <span>MAIL FROM</span>
@@ -953,7 +958,7 @@ function renderRelays() {
         <div><strong>${escapeHtml(relay.id)}</strong>${relayBadges(relay)}</div>
         <div class="mono" style="color:var(--muted);font-size:11.5px">${escapeHtml(relay.host)}:${relay.port} · ${escapeHtml(relay.tls)}${relay.has_auth ? " · auth" : ""}</div>
       </td>
-      <td class="mono" style="font-size:11.5px">${escapeHtml(relay.from_address)}${relay.align_envelope ? "<br><span style='color:var(--muted)'>SPF aligned</span>" : ""}</td>
+      <td class="mono" style="font-size:11.5px">${relay.from_address ? escapeHtml(relay.from_address) : '<span style="color:var(--ok)">Dynamic (From app)</span>'}${relay.align_envelope ? "<br><span style='color:var(--muted)'>SPF aligned</span>" : ""}</td>
       <td>${relayStatusPill(relay)}${cooldown}${error}</td>
       <td class="num">
         <div>${relay.weight_percent.toFixed(0)}%</div>
@@ -992,7 +997,7 @@ function renderRelays() {
         <div style="flex:1;min-width:0">
           <div><strong>${escapeHtml(relay.id)}</strong> ${relayStatusPill(relay)}${relayBadges(relay)}</div>
           <div class="relay-card-meta mono">${escapeHtml(relay.host)}:${relay.port} · ${escapeHtml(relay.tls)}</div>
-          <div class="mono" style="font-size:12px">${escapeHtml(relay.from_address)}</div>
+          <div class="mono" style="font-size:12px">${relay.from_address ? escapeHtml(relay.from_address) : '<span style="color:var(--ok)">Dynamic (From app)</span>'}</div>
         </div>
       </div>
       <div class="relay-card-stats">
@@ -2083,12 +2088,12 @@ $("relay-form").onsubmit = async (event) => {
   }
   if (payload.from_same_as_username) {
     const username = $("relay-user").value.trim();
-    if (!looksLikeEmail(username) && !payload.from_address) {
-      $("relay-form-error").textContent = "Username must be an email, or uncheck “same as username” and set From.";
+    if (!looksLikeEmail(username)) {
+      $("relay-form-error").textContent = "Username is not an email. Uncheck “Same as username” to use Dynamic (from app) or a custom From address.";
       return;
     }
-  } else if (!payload.from_address) {
-    $("relay-form-error").textContent = "From address is required when it is not the same as username.";
+  } else if (payload.from_address && !looksLikeEmail(payload.from_address)) {
+    $("relay-form-error").textContent = "From address must be a valid email, or leave it blank for Dynamic (from app).";
     return;
   }
   if ($("relay-limit-minute").checked && payload.max_per_minute == null) {
