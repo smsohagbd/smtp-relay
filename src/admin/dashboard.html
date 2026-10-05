@@ -917,6 +917,17 @@ function quotaCell(relay) {
   return parts.join("<br>");
 }
 
+function relayBadges(relay) {
+  const detail = relay.smtp_detail_id ? SMTP_DETAILS.find((d) => d.id === relay.smtp_detail_id) : null;
+  const detailBadge = relay.smtp_detail_id
+    ? `<span class="pill" style="background:#1e293b;border:1px solid #334155;color:#93c5fd;font-size:11px;margin-left:6px" title="Associated SMTP Detail: ${escapeHtml(detail ? (detail.label || detail.hostname || detail.username) : relay.smtp_detail_id)}">🏷️ ${escapeHtml(detail ? (detail.label || detail.hostname || detail.username) : relay.smtp_detail_id)}</span>`
+    : "";
+  const poolBadge = relay.in_rotation_pool === false
+    ? `<span class="pill warn" style="font-size:10.5px;margin-left:5px" title="Excluded from rotation pool">No-Pool</span>`
+    : "";
+  return detailBadge + poolBadge;
+}
+
 function renderRelays() {
   if (!RELAYS.length) {
     $("relay-table").innerHTML = '<div class="empty">No SMTP providers yet. Click <strong>Add SMTP provider</strong> to add the first one.</div>';
@@ -932,18 +943,11 @@ function renderRelays() {
     const cooldown = relay.cooldown_remaining_seconds
       ? `<div style="color:var(--muted);font-size:11px">retry in ${relay.cooldown_remaining_seconds}s</div>`
       : "";
-    const detail = relay.smtp_detail_id ? SMTP_DETAILS.find((d) => d.id === relay.smtp_detail_id) : null;
-    const detailBadge = relay.smtp_detail_id
-      ? `<span class="pill" style="background:#1e293b;border:1px solid #334155;color:#93c5fd;font-size:11px;margin-left:6px" title="Associated SMTP Detail: ${escapeHtml(detail ? (detail.label || detail.hostname || detail.username) : relay.smtp_detail_id)}">🏷️ ${escapeHtml(detail ? (detail.label || detail.hostname || detail.username) : relay.smtp_detail_id)}</span>`
-      : "";
-    const poolBadge = relay.in_rotation_pool === false
-      ? `<span class="pill warn" style="font-size:10.5px;margin-left:5px" title="Excluded from rotation pool">No-Pool</span>`
-      : "";
 
     return `<tr>
       <td><input type="checkbox" class="relay-check" data-id="${escapeHtml(relay.id)}" ${checked}></td>
       <td>
-        <div><strong>${escapeHtml(relay.id)}</strong>${detailBadge}${poolBadge}</div>
+        <div><strong>${escapeHtml(relay.id)}</strong>${relayBadges(relay)}</div>
         <div class="mono" style="color:var(--muted);font-size:11.5px">${escapeHtml(relay.host)}:${relay.port} · ${escapeHtml(relay.tls)}${relay.has_auth ? " · auth" : ""}</div>
       </td>
       <td class="mono" style="font-size:11.5px">${escapeHtml(relay.from_address)}${relay.align_envelope ? "<br><span style='color:var(--muted)'>SPF aligned</span>" : ""}</td>
@@ -983,7 +987,7 @@ function renderRelays() {
       <div class="relay-card-top">
         <input type="checkbox" class="relay-check" data-id="${escapeHtml(relay.id)}" ${checked}>
         <div style="flex:1;min-width:0">
-          <div><strong>${escapeHtml(relay.id)}</strong> ${relayStatusPill(relay)}${detailBadge}${poolBadge}</div>
+          <div><strong>${escapeHtml(relay.id)}</strong> ${relayStatusPill(relay)}${relayBadges(relay)}</div>
           <div class="relay-card-meta mono">${escapeHtml(relay.host)}:${relay.port} · ${escapeHtml(relay.tls)}</div>
           <div class="mono" style="font-size:12px">${escapeHtml(relay.from_address)}</div>
         </div>
