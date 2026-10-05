@@ -137,6 +137,8 @@ impl Response {
 
     pub fn html(body: &str) -> Self {
         Self::new(200, "text/html; charset=utf-8", body.as_bytes().to_vec())
+            .with_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            .with_header("Pragma", "no-cache")
     }
 
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
